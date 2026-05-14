@@ -1923,8 +1923,15 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
         finally:
             svos_done = SIGNAL_DIR / f'{qdf}_svos_done.signal'
             try:
-                svos_done.write_text('done\n')
-                _status(f'Signal written for SV: {svos_done.name}', 'info')
+                # Only write svos_done if the QDF completed SUCCESSFULLY
+                # This signals to pysv (idle loop) that this QDF is ready to move to the next
+                if all_results and all_results[-1]['overall'] == 'PASS':
+                    svos_done.write_text('done\n')
+                    _status(f'Signal written for SV: {svos_done.name}', 'info')
+                else:
+                    # If failed/error/timeout, write error signal so pysv knows about the failure
+                    svos_done.write_text('error\n')
+                    _status(f'Error signal written for SV: {svos_done.name}', 'info')
             except Exception as e:
                 _status(f'Could not write the SV signal: {e}', 'fail')
 
