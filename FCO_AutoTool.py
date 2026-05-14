@@ -1169,6 +1169,24 @@ def _self_update():
         if removed:
             print(f'  [update] {len(removed)} previous signal(s) removed.')
 
+    # If there are local changes, stash them temporarily so pull can proceed.
+    stash_created = False
+    status = subprocess.run(
+        [git_exe, '-C', str(BASE_DIR), 'status', '--porcelain'],
+        capture_output=True, text=True
+    )
+    if status.returncode == 0 and status.stdout.strip():
+        print('  [update] Local changes detected. Creating temporary stash...')
+        stash = subprocess.run(
+            [git_exe, '-C', str(BASE_DIR), 'stash', 'push', '--include-untracked', '-m', 'fco-autoupdate-autostash'],
+            capture_output=True, text=True
+        )
+        if stash.returncode != 0:
+            print(f'  [update] could not stash local changes: {stash.stderr.strip()}')
+            print('  [update] skipping git pull to avoid losing local work.')
+            return
+        stash_created = 'No local changes to save' not in (stash.stdout or '')
+
     # Pull latest changes from GitHub
     pull = subprocess.run(
         [git_exe, '-C', str(BASE_DIR), 'pull', '--ff-only'],
@@ -1177,7 +1195,24 @@ def _self_update():
 
     if pull.returncode != 0:
         print(f'  [update] git pull failed: {pull.stderr.strip()}')
+        if stash_created:
+            pop = subprocess.run(
+                [git_exe, '-C', str(BASE_DIR), 'stash', 'pop'],
+                capture_output=True, text=True
+            )
+            if pop.returncode != 0:
+                print('  [update] warning: could not auto-restore stash after pull failure.')
+                print('           Recover manually with: git stash list / git stash pop')
         return
+
+    if stash_created:
+        print('  [update] Restoring local changes from temporary stash...')
+        pop = subprocess.run(
+            [git_exe, '-C', str(BASE_DIR), 'stash', 'pop'],
+            capture_output=True, text=True
+        )
+        if pop.returncode != 0:
+            print('  [update] warning: stash restore had conflicts. Resolve and continue.')
 
     # Get commit hash after pulling
     after = subprocess.run(
@@ -1208,9 +1243,13 @@ def _self_update():
 
 
 def _update_readme():
-    """Updates the paths in README.txt with the real path where the script is located.
-    Uses regex to always replace them without depending on a fixed placeholder."""
-    import re
+    """Updates README path placeholders with the local BASE_DIR.
+    To avoid dirtying tracked files every run, replacements happen only when
+    explicit placeholders are present.
+    Supported placeholders:
+        __FCO_BASE_DIR__
+        __FCO_BASE_DIR_RAW__
+    """
     readme = BASE_DIR / 'README.txt'
     if not readme.exists():
         return
@@ -1218,19 +1257,13 @@ def _update_readme():
         path_str = str(BASE_DIR)
         content  = readme.read_text(encoding='utf-8')
 
-        # Line:  cd <any path>\fco_automation  or  cd <placeholder>
-        content = re.sub(
-            r'(  cd )(.+)',
-            lambda m: m.group(1) + path_str,
-            content
-        )
-        # Line:  sys.path.insert(0, r'<any path>')
-        content = re.sub(
-            r"(  sys\.path\.insert\(0, r')([^']+)(')",
-            lambda m: m.group(1) + path_str + m.group(3),
-            content
-        )
-        readme.write_text(content, encoding='utf-8')
+        updated = content
+        updated = updated.replace('__FCO_BASE_DIR__', path_str)
+        updated = updated.replace('__FCO_BASE_DIR_RAW__', path_str)
+
+        if updated != content:
+            # Replace only explicit placeholders; do not rewrite generic README lines.
+            readme.write_text(updated, encoding='utf-8')
     except Exception:
         pass  # Not critical, do not interrupt execution
 
