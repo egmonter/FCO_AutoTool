@@ -91,8 +91,8 @@ LOG_DIR       = BASE_DIR / 'logs'
 QDF_LIST_FILE    = BASE_DIR / 'qdf_list.json'
 LAST_CONFIG_FILE = BASE_DIR / 'last_config.json'
 
-# Path in IDrive where the master version of the project lives
-IDRIVE_SOURCE = Path(r'I:\engineering\dev\user_links\egmonter\fco_automation')
+# GitHub repo for auto-update
+GITHUB_REPO_URL = 'https://github.com/egmonter/FCO_AutoTool.git'
 
 BAUDRATE      = 115200
 
@@ -963,19 +963,46 @@ def _clean_signals(qdf_list):
 
 def _self_update():
     """
-    Syncs all files from IDrive to the local directory before starting.
-    Excludes the logs/, signals/ and __pycache__ folders.
-    If svos_automation.py was replaced, relaunches the process with the same
+    Pulls the latest version from GitHub before starting.
+    Requires git to be installed and the local directory to be a git repo.
+    If svos_automation.py was updated, relaunches the process with the same
     arguments so the new version is the one that runs.
     """
-    import shutil
+    import subprocess
 
-    SKIP_DIRS  = {'logs', '__pycache__'}
-    SKIP_EXTS  = {'.pyc', '.log'}
+    GIT_CANDIDATES = [
+        r'C:\Program Files\Git\bin\git.exe',
+        r'C:\Program Files (x86)\Git\bin\git.exe',
+        'git',
+    ]
 
-    if not IDRIVE_SOURCE.exists():
-        print(f'  [update] IDrive not accessible ({IDRIVE_SOURCE}), skipping update.')
+    git_exe = None
+    for candidate in GIT_CANDIDATES:
+        try:
+            subprocess.run([candidate, '--version'], capture_output=True, check=True)
+            git_exe = candidate
+            break
+        except Exception:
+            continue
+
+    if git_exe is None:
+        print('  [update] git not found, skipping update.')
         return
+
+    # Verify this folder is a git repo
+    result = subprocess.run(
+        [git_exe, '-C', str(BASE_DIR), 'rev-parse', '--is-inside-work-tree'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f'  [update] {BASE_DIR} is not a git repo, skipping update.')
+        return
+
+    # Get current commit hash before pulling
+    before = subprocess.run(
+        [git_exe, '-C', str(BASE_DIR), 'rev-parse', 'HEAD'],
+        capture_output=True, text=True
+    ).stdout.strip()
 
     # Clean local signals to guarantee a fresh run
     if SIGNAL_DIR.exists():
@@ -986,48 +1013,40 @@ def _self_update():
         if removed:
             print(f'  [update] {len(removed)} previous signal(s) removed.')
 
-    self_was_updated = False
-    updated = []
+    # Pull latest changes from GitHub
+    pull = subprocess.run(
+        [git_exe, '-C', str(BASE_DIR), 'pull', '--ff-only'],
+        capture_output=True, text=True
+    )
 
-    for src in IDRIVE_SOURCE.rglob('*'):
-        if src.is_dir():
-            continue
-        rel = src.relative_to(IDRIVE_SOURCE)
-        # Skip excluded folders
-        if any(part in SKIP_DIRS for part in rel.parts):
-            continue
-        # Skip excluded extensions
-        if src.suffix.lower() in SKIP_EXTS:
-            continue
+    if pull.returncode != 0:
+        print(f'  [update] git pull failed: {pull.stderr.strip()}')
+        return
 
-        dst = BASE_DIR / rel
-        # Copy if the file does not exist or the IDrive version is newer
-        if not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            updated.append(str(rel))
-            if rel.name == 'svos_automation.py':
-                self_was_updated = True
+    # Get commit hash after pulling
+    after = subprocess.run(
+        [git_exe, '-C', str(BASE_DIR), 'rev-parse', 'HEAD'],
+        capture_output=True, text=True
+    ).stdout.strip()
 
-    # Always force-copy README.txt from IDrive so it stays up to date
-    readme_src = IDRIVE_SOURCE / 'README.txt'
-    readme_dst = BASE_DIR / 'README.txt'
-    if readme_src.exists():
-        shutil.copy2(readme_src, readme_dst)
-        if 'README.txt' not in updated:
-            updated.append('README.txt')
+    if before == after:
+        print('  [update] Everything up to date (GitHub).')
+        return
 
-    if updated:
-        print(f'  [update] {len(updated)} file(s) updated: {", ".join(updated)}')
-    else:
-        print(f'  [update] Everything up to date ({IDRIVE_SOURCE.name}).')
+    # List files changed between the two commits
+    diff = subprocess.run(
+        [git_exe, '-C', str(BASE_DIR), 'diff', '--name-only', before, after],
+        capture_output=True, text=True
+    ).stdout.strip()
+    changed = diff.splitlines() if diff else []
 
-    # Fix local paths in README right after syncing from IDrive
+    print(f'  [update] {len(changed)} file(s) updated: {", ".join(changed)}')
+
+    # Fix local paths in README after update
     _update_readme()
 
-    if self_was_updated:
+    if 'svos_automation.py' in changed:
         print('  [update] svos_automation.py was updated — relaunching the new version...')
-        import subprocess
         subprocess.Popen([sys.executable] + sys.argv)
         sys.exit(0)
 
