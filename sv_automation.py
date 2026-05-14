@@ -161,7 +161,7 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     retry_signal = sig_dir / 'retry_needed.signal'
     
     while True:
-        print("\n  [IDLE] Monitoring for CentOS power cycle or retry requests...")
+        print("\n  [IDLE] Monitoring for CentOS power cycle or wrapper requests...")
         
         # Check for CentOS power cycle signals
         centos_handled = False
@@ -190,6 +190,39 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
         
         if centos_handled:
             print("  [IDLE] CentOS power cycle handled. Returning to idle monitoring...\n")
+            continue
+        
+        # Check for CentOS wrapper signals (Mode 1/3/4)
+        wrapper_handled = False
+        for qdf_str in all_qdf_strs:
+            wrapper_sig = sig_dir / f'{qdf_str}_centos_wrapper.signal'
+            if wrapper_sig.exists():
+                wrapper_handled = True
+                print(f"\n  [CentOS-Wrapper] Detected: {wrapper_sig.name}")
+                try:
+                    # Parse wrapper parameters from signal file
+                    wrapper_params = json.loads(wrapper_sig.read_text().strip())
+                    qdf_w = wrapper_params.get('qdf', qdf_str)
+                    ult0_w = wrapper_params.get('ult0')
+                    soc_w = wrapper_params.get('soc', 'x4')
+                    kwargs_w = wrapper_params.get('kwargs', {})
+                    
+                    # Build full parameters
+                    all_params_w = dict(qdf=qdf_w, ult0=ult0_w, soc=soc_w, **FIXED_PARAMS)
+                    all_params_w.update(kwargs_w)
+                    
+                    print(f"  [CentOS-Wrapper] Executing wrapper for {qdf_w}...")
+                    params_str = ', '.join(f"{k}={v!r}" for k, v in all_params_w.items())
+                    print(f"  [CentOS-Wrapper] bs_wrap.main({params_str})")
+                    bs_wrap.main(**all_params_w)
+                    (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('done\n')
+                    print(f"  [CentOS-Wrapper] Wrapper execution completed. Signal written: {qdf_str}_centos_wrapper_done.signal")
+                except Exception as e:
+                    print(f"  [!!] Error during wrapper execution for {qdf_str}: {e}")
+                    (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('error\n')
+        
+        if wrapper_handled:
+            print("  [IDLE] CentOS wrapper handled. Returning to idle monitoring...\n")
             continue
         
         # Wait for retry_needed with timeout (check every 30s for CentOS signals)

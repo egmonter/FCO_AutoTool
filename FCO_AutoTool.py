@@ -1455,44 +1455,33 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             _wait_for_file(power_cycled_signal)
             _status('Power cycle completed by pysv.', 'ok')
         else:
-            # Modes with pysv (1, 3, 4): request one overwrite before CentOS
-            signal_prefix = f'{qdf}_centos' if is_retry else qdf
-            _status('pysv path: requesting final overwrite for CentOS boot...', 'info')
+            # Modes with pysv (1, 3, 4): request wrapper to run for CentOS overwrite
+            _status('Modes 1/3/4: Requesting wrapper execution from pysv...', 'info')
             
-            # Clean signals
-            for name in [f'{signal_prefix}_sv_done.signal', f'{signal_prefix}_svos_done.signal']:
+            # Clean previous signals
+            for name in [f'{qdf}_centos_wrapper.signal', f'{qdf}_centos_wrapper_done.signal']:
                 sig = SIGNAL_DIR / name
                 if sig.exists():
                     sig.unlink()
             
-            # Write qdf_list.json with signal prefix (so sv_automation knows this is for CentOS)
-            entry = {'qdf': qdf, 'ult0': ult0, 'soc': soc}
-            if kwargs:
-                entry['kwargs'] = kwargs
-            with open(QDF_LIST_FILE, 'w', encoding='utf-8') as f:
-                json.dump([entry], f, indent=2)
+            # Write wrapper request signal
+            wrapper_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper.signal'
+            wrapper_signal.write_text(json.dumps({
+                'qdf': qdf, 'ult0': ult0, 'soc': soc, 'kwargs': kwargs or {}
+            }) + '\n')
+            _status(f'Sent signal: {wrapper_signal.name}', 'info')
             
-            print()
-            print('=' * 60)
-            print('  CentOS Boot — Requesting Overwrite')
-            print('=' * 60)
-            print(f'  In your pysv session, run sv_automation.run_qdf_list(itp, sv, bs_wrap)')
-            print(f'  Waiting for overwrite signal...')
-            print()
+            # Wait for wrapper completion
+            wrapper_done_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper_done.signal'
+            _status(f'Waiting for pysv wrapper execution...', 'wait')
+            _wait_for_file(wrapper_done_signal)
             
-            # Wait for sv_done signal
-            sv_done = SIGNAL_DIR / f'{signal_prefix}_sv_done.signal'
-            _wait_for_file(sv_done)
-            
-            if sv_done.read_text().strip() == 'error':
-                _status('sv_automation reported error in overwrite.', 'fail')
+            done_content = wrapper_done_signal.read_text().strip()
+            if done_content == 'error':
+                _status('pysv reported error in wrapper execution.', 'fail')
                 return 'FAIL'
             
-            _status('Overwrite completed. Ready for CentOS boot.', 'ok')
-            
-            # Write svos_done so sv_automation continues
-            (SIGNAL_DIR / f'{signal_prefix}_svos_done.signal').write_text('done\n')
-            _pause('TEST MODE: Overwrite handshake completed. Press any key to continue to CentOS boot...')
+            _status('Wrapper execution completed by pysv.', 'ok')
         
         # Boot CentOS
         boot_centos(s, fused_nudge=(mode in (2, 3, 4)))

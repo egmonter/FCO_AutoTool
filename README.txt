@@ -240,14 +240,22 @@ RESULTS AND LOGS
 
   - CentOS Boot Check details are documented in Tool 1 content + Tool 4 sections.
 
-  - IMPORTANT: Mode 2 CentOS Boot (Automatic Power Cycle):
-      In Mode 2 (fused unit), SVOS 'reboot' command does not work.
-      Instead, FCO_AutoTool handles this automatically:
-        1. FCO_AutoTool sends signal to pysv: {QDF}_centos_power_cycle.signal
-        2. pysv immediately executes power cycle (short: 5s OFF → 15s boot wait)
-        3. pysv confirms with signal: {QDF}_centos_power_cycled.signal
+  - AUTOMATIC CentOS Boot Coordination (All Modes):
+      CentOS boot requires reboot/overwrite, handled automatically via pysv coordination:
+      
+      Mode 2 (Fused unit — immediate power cycle):
+        1. FCO_AutoTool sends signal: {QDF}_centos_power_cycle.signal
+        2. pysv (idle loop) detects → executes power cycle (5s OFF → 15s boot)
+        3. pysv confirms: {QDF}_centos_power_cycled.signal
         4. FCO_AutoTool continues CentOS boot via BIOS → UEFI → BootCentosDMR.efi
-      No manual intervention needed for Mode 2 CentOS boot — pysv handles it.
+      
+      Modes 1/3/4 (Non-fused units — wrapper execution):
+        1. FCO_AutoTool sends signal: {QDF}_centos_wrapper.signal (with QDF params)
+        2. pysv (idle loop) detects → executes wrapper (bs_wrap.main with params)
+        3. pysv confirms: {QDF}_centos_wrapper_done.signal
+        4. FCO_AutoTool continues CentOS boot via BIOS → UEFI → BootCentosDMR.efi
+      
+      No manual intervention needed — pysv handles everything in idle monitoring loop.
 
   - SPECIAL CASE: If ONLY CentOS Boot is selected (no SVOS tests):
       - boot_svos() runs but skips setup_fco_dir (no directory/file setup)
