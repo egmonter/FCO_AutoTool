@@ -139,7 +139,7 @@ SOLAR_CMD = ('/usr/bin/solar/solar.sh /meshgv '
              '-ratioPUnit2f1 P0...Pn -ratioPUnit5f1 P0...Pn /log .')
 
 # Canonical content keys (display order for the user)
-CONTENT_TESTS = ('supercollider', 'rocket', 'memicals', 'mlc', 'solar', 'centos_boot')
+CONTENT_TESTS = ('supercollider', 'rocket', 'memicals', 'mlc', 'solar', 'svos_boot', 'centos_boot')
 
 # Display names per content key
 _CONTENT_DISPLAY = {
@@ -148,6 +148,7 @@ _CONTENT_DISPLAY = {
     'memicals':      'Memicals',
     'mlc':           'MLC',
     'solar':         'Solar',
+    'svos_boot':     'SVOS Boot (svosinfo response check)',
     'centos_boot':   'CentOS Boot (root/root + ifconfig)',
 }
 
@@ -162,6 +163,7 @@ CONTENT_CMDS = {
     'solar':           ('/usr/bin/solar/solar.sh /meshgv -ratioPUnit0 "" -ratioPUnit1 "" '
                         '-ratioPUnit2 P0...Pn -ratioPUnit3 "" -ratioPUnit4 "" '
                         '-ratioPUnit5 P0...Pn -ratioPUnit2f1 P0...Pn -ratioPUnit5f1 P0...Pn /log .'),
+    'svos_boot':       'svosinfo (boot validation)',
     'centos_boot':     '\\efi\\boot\\BootCentosDMR.efi (login: root/root, ifconfig check)',
 }
 
@@ -916,6 +918,22 @@ def run_parser(s: SVOSSession):
     _status('Parser completed. Results in output/output.log', 'ok')
 
 
+def run_svos_boot_check(s: SVOSSession) -> str:
+    """Validates SVOS responsiveness by running svosinfo and waiting for prompt."""
+    _status('Validating SVOS boot with svosinfo...', 'step')
+    try:
+        s.flush()
+        s.send('svosinfo')
+        with _guard('svosinfo response for SVOS boot check'):
+            s.read_until(SVOS_PROMPT, timeout=SVOSINFO_TIMEOUT)
+        _status('SVOS boot validation successful (svosinfo responded).', 'ok')
+        return 'PASS'
+    except Exception as e:
+        _status(f'SVOS boot validation FAILED: {e}', 'fail')
+        logging.error(f'SVOS boot validation failed: {e}', exc_info=True)
+        return 'FAIL'
+
+
 def get_ifwi_version() -> str:
     """Looks for the most recent .log file in C:\\DediLog and extracts the IFWI name (csPath=)."""
     dedi_dir = Path('C:/DediLog')
@@ -955,6 +973,7 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
         'memicals',
         'mlc',
         'solar',
+        'svos_boot',
         'centos_boot',
     ]
 
@@ -1011,6 +1030,7 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
             'mlc':            'MLC',
             'solar':          'Solar',
             'rocket_dsa':     'Rocket DSA',
+            'svos_boot':      'SVOS Boot Check',
             'centos_boot':    'CentOS Boot',
         }
         LBL_W = 18
@@ -1395,12 +1415,12 @@ def _ask_qdf_params(label=''):
 def _has_svos_content(content) -> bool:
     """
     Checks if there is any SVOS content to run (not just CentOS boot).
-    Returns True if there's at least one test other than centos_boot.
+    Returns True if there's at least one test other than centos_boot/svos_boot.
     content=None means full content (True).
     """
     if content is None:
         return True
-    return any(test in content for test in CONTENT_TESTS if test != 'centos_boot')
+    return any(test in content for test in CONTENT_TESTS if test not in ('centos_boot', 'svos_boot'))
 
 
 def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = 'x4', 
@@ -1494,7 +1514,11 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
 # ---------------------------------------------------------------------------
 
 def _should_run(content, test_name):
-    """Returns True if the test should run. content=None means full content."""
+    """Returns True if the test should run. content=None means full content.
+    svos_boot runs only when explicitly selected.
+    """
+    if content is None and test_name == 'svos_boot':
+        return False
     return content is None or test_name in content
 
 
@@ -1542,10 +1566,14 @@ def _ask_content_config(qdf_list):
                 if r in ('s', 'y'):
                     selected.append(key)
             if not selected:
-                print(f'  [!!] Select at least one test for {qdf}.')
+                boot_only = input('    No content selected. Boot SVOS only (svosinfo check)? (y/n): ').strip().lower()
+                if boot_only in ('s', 'y'):
+                    selected = ['svos_boot']
+                else:
+                    print(f'  [!!] Select at least one test for {qdf}.')
 
         item['content'] = selected
-        selected_display = ', '.join(d for k, d in _LABELS if k in selected)
+        selected_display = ', '.join(_CONTENT_DISPLAY.get(k, k) for k in selected)
         print(f'  {qdf}: {selected_display}')
         print()
 
@@ -1802,6 +1830,14 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar')
                                    if _should_run(content, 'solar')    else 'SKIPPED')
 
+            if _should_run(content, 'svos_boot'):
+                t0_svos_boot = time.time()
+                results['svos_boot'] = run_svos_boot_check(s)
+                if CRONOS_MODE:
+                    _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot
+            else:
+                results['svos_boot'] = 'SKIPPED'
+
             if _should_run(content, 'rocket'):
                 results['rocket_dram_dsa'] = _run_safe('Rocket DSA', run_rocket_dsa, s,
                                                        _tkey='rocket_dsa')
@@ -1903,13 +1939,15 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 wait_for_signal(SIGNAL_DIR / f'{qdf}_retry_sv_done.signal')
                 _status(f'Retry overwrite of {qdf} completed. Booting SVOS...', 'ok')
 
+                content_r = retry_item.get('content')
                 t0_boot_r = time.time()
                 boot_svos(s)
-                setup_fco_dir(s, qdf, week)
+                has_svos_tests_r = _has_svos_content(content_r)
+                if has_svos_tests_r:
+                    setup_fco_dir(s, qdf, week)
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot_r
 
-                content_r = retry_item.get('content')
                 results = {}
 
                 def _run_safe_r(name, fn, *args, _tkey=None):
@@ -1948,16 +1986,25 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['solar']    = (_run_safe_r('Solar', run_solar, s, _tkey='solar')
                                        if _should_run(content_r, 'solar')    else 'SKIPPED')
 
+                if _should_run(content_r, 'svos_boot'):
+                    t0_svos_boot_r = time.time()
+                    results['svos_boot'] = run_svos_boot_check(s)
+                    if CRONOS_MODE:
+                        _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot_r
+                else:
+                    results['svos_boot'] = 'SKIPPED'
+
                 if _should_run(content_r, 'rocket'):
                     results['rocket_dram_dsa'] = _run_safe_r('Rocket DSA', run_rocket_dsa, s,
                                                              _tkey='rocket_dsa')
                 else:
                     results['rocket_dram_dsa'] = 'SKIPPED'
 
-                try:
-                    run_parser(s)
-                except Exception as e:
-                    _status(f'Parser failed in retry: {e}', 'fail')
+                if has_svos_tests_r:
+                    try:
+                        run_parser(s)
+                    except Exception as e:
+                        _status(f'Parser failed in retry: {e}', 'fail')
 
                 log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, LOG_DIR,
                                                      timings=_timings.get(qdf) if CRONOS_MODE else None,
@@ -2056,6 +2103,14 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
                            if _should_run(content, 'mlc')      else 'SKIPPED')
     results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar')
                            if _should_run(content, 'solar')    else 'SKIPPED')
+
+    if _should_run(content, 'svos_boot'):
+        t0_svos_boot = time.time()
+        results['svos_boot'] = run_svos_boot_check(s)
+        if CRONOS_MODE:
+            _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot
+    else:
+        results['svos_boot'] = 'SKIPPED'
 
     if _should_run(content, 'rocket'):
         results['rocket_dram_dsa'] = _run_safe('Rocket DSA', run_rocket_dsa, s,

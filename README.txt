@@ -71,6 +71,9 @@ TOOL 1 (FCO Automation):
            * Solar
            * CentOS Boot (optional: reboots system, boots via BootCentosDMR.efi,
                           login root/root, runs ifconfig check)
+       - If you answer "no" to all content items, the tool asks:
+           * Boot SVOS only? (svosinfo response check)
+         This runs a basic SVOS boot validation without full content tests.
 
 TOOL 2 (Boot SVOS only):
   - COM port → same as above
