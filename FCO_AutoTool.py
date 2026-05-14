@@ -2190,7 +2190,7 @@ def _ask_tool_menu() -> str:
     print('  1 - FCO Automation          (fuse + test)')
     print('  2 - Boot SVOS only')
     print('  3 - Update SVOS             (osvsetrelease + osvosupdate)')
-    print('  4 - Boot CentOS only')
+    print('  4 - Boot CentOS only      (normal/direct + wrapper)')
     print()
     print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)')
     print()
@@ -2445,42 +2445,138 @@ def run_update_svos(com_port: str):
 
 def run_boot_centos_direct(com_port: str):
     """
-    Tool 4: Boot CentOS only (TEST mode).
-    Assumes BootCentosDMR.efi is already executing (skip BIOS navigation).
-    Useful for quick testing when the boot media is already in progress.
+    Tool 4: Boot CentOS only.
+
+    Supports two paths:
+      1) Normal boot (BIOS -> BootCentosDMR.efi)
+         Uses SVOS-like wrapper flow if needed.
+      2) Direct TEST (skip BIOS)
+         Assumes BootCentosDMR.efi is already executing.
     """
     print()
     print('=' * 60)
-    print('  BOOT CENTOS ONLY (TEST MODE)')
+    print('  BOOT CENTOS ONLY')
     print('=' * 60)
     print()
-    print('  This mode assumes BootCentosDMR.efi is ALREADY EXECUTING.')
-    print('  It skips BIOS navigation and waits for the login prompt.')
+
+    print('  Select mode:')
+    print('  1 - Normal CentOS boot (BIOS navigation)')
+    print('  2 - Direct TEST (skip BIOS, login prompt only)')
     print()
+
+    while True:
+        boot_mode = input('  Mode (1-2): ').strip()
+        if boot_mode in ('1', '2'):
+            break
+        print('  [!!] Enter 1 or 2.')
+
+    # ------------------------
+    # Mode 2: direct TEST
+    # ------------------------
+    if boot_mode == '2':
+        print()
+        print('  Direct TEST mode selected.')
+        print('  This mode assumes BootCentosDMR.efi is ALREADY EXECUTING.')
+        print('  It skips BIOS navigation and waits for the login prompt.')
+        print()
+
+        _status(f'Opening {com_port}...', 'step')
+        s = _open_serial(com_port)
+        try:
+            _pause('Ready to test CentOS direct login. Press a key...')
+            result = boot_centos_direct(s)
+
+            if result == 'PASS':
+                _status('CentOS Direct Login: PASS', 'ok')
+                _alert_popup_async('CentOS Direct Boot OK',
+                                   'CentOS login and ifconfig check passed successfully.')
+            else:
+                _status('CentOS Direct Login: FAIL', 'fail')
+                _alert_popup('CentOS Direct Boot FAILED',
+                            'CentOS login or validation failed.\nCheck console output for details.')
+
+            print()
+            print('=' * 60)
+            print('  TEST COMPLETED')
+            print('=' * 60)
+        except Exception as e:
+            _status(f'Error during CentOS direct test: {e}', 'fail')
+            logging.error(f'Boot CentOS direct failed: {e}', exc_info=True)
+            _alert_popup('CentOS Direct Boot FAILED', str(e))
+        finally:
+            s.close()
+            _status(f'Port {com_port} closed.', 'info')
+        return
+
+    # ------------------------
+    # Mode 1: normal CentOS boot with wrapper options
+    # ------------------------
+    fused = _ask_fused()
+    did_wrapper = False
+
+    if not fused:
+        qdfs, ult0, soc, kwargs = _ask_qdf_params()
+        if not qdfs:
+            print('[!!] ERROR: no QDF entered.')
+            return
+        if len(qdfs) > 1:
+            print('[!] For Boot CentOS only the first QDF is used for wrapper overwrite.')
+        qdf = qdfs[0]
+        try:
+            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+            did_wrapper = True
+        except Exception as e:
+            _status(f'Error in overwrite: {e}', 'fail')
+            _alert_popup('Overwrite FAILED', str(e))
+            return
+    else:
+        print()
+        print('  Fused unit detected.')
+        print('  Optional wrapper is available (same logic as Boot SVOS).')
+        use_wrapper = input('  Use wrapper before CentOS boot? (y/n): ').strip().lower() in ('s', 'y', 'yes')
+        if use_wrapper:
+            qdfs, ult0, soc, kwargs = _ask_qdf_params('(wrapper for fused unit)')
+            if not qdfs:
+                print('[!!] ERROR: no QDF entered.')
+                return
+            if len(qdfs) > 1:
+                print('[!] For Boot CentOS only the first QDF is used for wrapper flow.')
+            qdf = qdfs[0]
+            try:
+                _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+                did_wrapper = True
+            except Exception as e:
+                _status(f'Error in wrapper overwrite: {e}', 'fail')
+                _alert_popup('Wrapper FAILED', str(e))
+                return
 
     _status(f'Opening {com_port}...', 'step')
     s = _open_serial(com_port)
     try:
-        _pause('Ready to test CentOS direct login. Press a key...')
-        result = boot_centos_direct(s)
-        
-        if result == 'PASS':
-            _status('CentOS Direct Login: PASS', 'ok')
-            _alert_popup_async('CentOS Direct Boot OK',
-                               'CentOS login and ifconfig check passed successfully.')
-        else:
-            _status('CentOS Direct Login: FAIL', 'fail')
-            _alert_popup('CentOS Direct Boot FAILED',
-                        'CentOS login or validation failed.\nCheck console output for details.')
+        _pause('Ready to start CentOS boot. Press a key...')
+
+        # If wrapper was not executed, try reboot from current shell first.
+        if not did_wrapper:
+            _status('Sending reboot command before BIOS navigation...', 'info')
+            try:
+                s.send('reboot')
+                time.sleep(1)
+            except Exception as e:
+                _status(f'Could not send reboot: {e}. Continuing with BIOS wait...', 'warn')
+
+        boot_centos(s)
+        _status('CentOS Boot: PASS', 'ok')
+        _alert_popup_async('CentOS Boot OK',
+                           'CentOS boot/login/ifconfig completed successfully.')
 
         print()
         print('=' * 60)
-        print('  TEST COMPLETED')
+        print('  BOOT COMPLETED')
         print('=' * 60)
     except Exception as e:
-        _status(f'Error during CentOS direct test: {e}', 'fail')
-        logging.error(f'Boot CentOS direct failed: {e}', exc_info=True)
-        _alert_popup('CentOS Direct Boot FAILED', str(e))
+        _status(f'Error during CentOS boot: {e}', 'fail')
+        logging.error(f'Boot CentOS failed: {e}', exc_info=True)
+        _alert_popup('CentOS Boot FAILED', str(e))
     finally:
         s.close()
         _status(f'Port {com_port} closed.', 'info')

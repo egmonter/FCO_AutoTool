@@ -86,12 +86,14 @@ TOOL 3 (Update SVOS):
 
 TOOL 4 (Boot CentOS only):
   - COM port → same as above
-  - Assumes BootCentosDMR.efi is ALREADY EXECUTING (TEST mode)
-  - Skips BIOS navigation
-  - Waits for dmr-bkc login: prompt
-  - Logs in with root/root
-  - Runs ifconfig to validate
-  - Useful for quick validation after manual BIOS boot or scripted boot
+  - Select mode:
+      1) Normal CentOS boot (BIOS -> UEFI -> BootCentosDMR.efi)
+      2) Direct TEST mode (assumes BootCentosDMR.efi already executing)
+  - Uses same wrapper logic as Boot SVOS:
+      - If unit is NOT fused: wrapper overwrite is coordinated before boot
+      - If unit is fused: optional wrapper can be executed before CentOS boot
+  - Normal mode validates with login root/root + ifconfig
+  - Direct mode skips BIOS and only validates login + ifconfig
 
 The script writes qdf_list.json with the entered parameters and then waits
 for the SV signal for each QDF. Do NOT close it.
