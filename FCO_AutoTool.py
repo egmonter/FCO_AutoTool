@@ -722,6 +722,7 @@ def boot_centos(s: SVOSSession):
             _status(f'{fs}: not available, trying next...', 'info')
             continue
 
+        _pause(f'Ready to launch BootCentosDMR.efi from {fs}:. Press any key to continue...')
         _status(f'Launching \\efi\\boot\\BootCentosDMR.efi from {fs}: ...', 'step')
         s.send_slow('\\efi\\boot\\BootCentosDMR.efi', char_delay=0.05)
 
