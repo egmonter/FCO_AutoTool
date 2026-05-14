@@ -9,7 +9,7 @@ Import inside the existing SV session:
     sv_automation.run_qdf_list(itp, sv, bs_wrap)
 
 Edit qdf_list.json with the QDF/ULT pairs before running.
-Coordinates with svos_automation.py via signal files in signals/
+Coordinates with FCO_AutoTool.py via signal files in signals/
 """
 
 import os
@@ -137,7 +137,7 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
             else:
                 return
 
-        # Signal svos_automation that it can proceed
+        # Signal FCO_AutoTool that it can proceed
         sv_done = sig_dir / f'{qdf}_sv_done.signal'
         sv_done.write_text('done\n')
         print(f"  Signal written: {sv_done.name}")

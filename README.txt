@@ -4,11 +4,11 @@
 
 FILES
 -----
-fco_automation/
+FCO_AutoTool/
 ├── config.json            <- EDIT: fixed wrapper parameters (proj, stepping, etc.)
-├── qdf_list.json          <- automatically generated when running svos_automation.py
+├── qdf_list.json          <- automatically generated when running FCO_AutoTool.py
 ├── sv_automation.py       <- run INSIDE the SV session
-├── svos_automation.py     <- run in a separate Python window
+├── FCO_AutoTool.py        <- run in a separate Python window
 ├── requirements.txt
 ├── signals/               <- SV<->SVOS coordination files (auto-generated)
 └── logs/                  <- per-QDF results + summary (auto-generated)
@@ -16,6 +16,7 @@ fco_automation/
 
 INSTALLATION (first time only)
 ----------------------------------
+  git clone https://github.com/egmonter/FCO_AutoTool.git
   pip install pyserial
 
 
@@ -23,12 +24,12 @@ INSTALLATION (first time only)
   STEP BY STEP
 ==============================================
 
-STEP 1 — Start svos_automation.py
--------------------------------------
+STEP 1 — Start FCO_AutoTool.py
+------------------------------
 Open a SEPARATE CMD/Python window and run:
 
-  cd <fco_automation_path>
-  python svos_automation.py
+  cd <FCO_AutoTool_path>
+  python FCO_AutoTool.py
 
 At startup it will prompt for:
 
@@ -65,11 +66,11 @@ In your already open SV session, paste this:
 
   import users.mkcummin.fle_bs_wrapper as bs_wrap
   import sys
-  sys.path.insert(0, r'<fco_automation_path>')
+  sys.path.insert(0, r'<FCO_AutoTool_path>')
   import sv_automation
   sv_automation.run_qdf_list(itp, sv, bs_wrap)
 
-  (The exact path is automatically updated each time svos_automation.py runs)
+  (The exact path is automatically updated each time FCO_AutoTool.py runs)
 
 sv_automation.py reads qdf_list.json, performs forcereconfig/unlock/refresh, and
 runs bs_wrap.main() for each QDF, then writes the coordination signal.
@@ -115,7 +116,7 @@ runs bs_wrap.main() for each QDF, then writes the coordination signal.
 AUTOMATIC RETRY (BIOS / mountsv timeout)
 ------------------------------------------
 If during the main loop a QDF fails due to a timeout in BIOS or mountsv,
-svos_automation.py queues it for retry. When the main loop finishes:
+FCO_AutoTool.py queues it for retry. When the main loop finishes:
 
   1. SVOS writes retry_needed.signal + retry_needed.json
   2. SV detects the signal, performs Power OFF → waits 5 min → Power ON
@@ -167,12 +168,12 @@ RESULTS AND LOGS
 ==============================================
 
   - The system must be powered on and reaching BIOS when
-    svos_automation.py detects the SV signal.
+    FCO_AutoTool.py detects the SV signal.
 
-  - To CANCEL: Ctrl+C in the svos_automation.py window
+  - To CANCEL: Ctrl+C in the FCO_AutoTool.py window
 
   - To REPEAT only one QDF:
-      Run svos_automation.py again normally with that QDF.
+      Run FCO_AutoTool.py again normally with that QDF.
       Previous signals are automatically cleaned at startup.
 
   - To REPEAT only the boot/tests without a new overwrite (Mode 2):
@@ -184,7 +185,7 @@ RESULTS AND LOGS
   - If BIOS navigation fails, the script retries up to 5 times
     sending ESC before each attempt.
 
-  - Configurable timeouts at the start of svos_automation.py:
+  - Configurable timeouts at the start of FCO_AutoTool.py:
       BIOS_WAIT_TIMEOUT  = 900s  (15 min)
       BOOT_TIMEOUT       = 600s  (10 min)
       MOUNTSV_TIMEOUT    = 1800s (30 min)

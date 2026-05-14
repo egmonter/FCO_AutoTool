@@ -1,11 +1,11 @@
 """
-FCO SVOS Serial Automation
-===========================
+FCO AutoTool - Serial Automation
+=================================
 Run this script in a separate Python window while sv_automation.py
 runs inside your SV session.
 
 Uso:
-    python svos_automation.py
+    python FCO_AutoTool.py
 
 Requisitos:
     pip install pyserial
@@ -965,7 +965,7 @@ def _self_update():
     """
     Pulls the latest version from GitHub before starting.
     Requires git to be installed and the local directory to be a git repo.
-    If svos_automation.py was updated, relaunches the process with the same
+    If FCO_AutoTool.py was updated, relaunches the process with the same
     arguments so the new version is the one that runs.
     """
     import subprocess
@@ -1045,8 +1045,8 @@ def _self_update():
     # Fix local paths in README after update
     _update_readme()
 
-    if 'svos_automation.py' in changed:
-        print('  [update] svos_automation.py was updated — relaunching the new version...')
+    if 'FCO_AutoTool.py' in changed:
+        print('  [update] FCO_AutoTool.py was updated — relaunching the new version...')
         subprocess.Popen([sys.executable] + sys.argv)
         sys.exit(0)
 
@@ -2107,7 +2107,7 @@ def main():
     _update_readme()
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    setup_logging(LOG_DIR / f'svos_automation_{ts}.log')
+    setup_logging(LOG_DIR / f'FCO_AutoTool_{ts}.log')
     SIGNAL_DIR.mkdir(parents=True, exist_ok=True)
 
     logging.info('=== FCO SVOS Automation ===')
