@@ -1169,6 +1169,32 @@ def _self_update():
         if removed:
             print(f'  [update] {len(removed)} previous signal(s) removed.')
 
+    # README policy: allow overwrite from repo, but backup local edits first.
+    readme_rel = 'README.txt'
+    readme_path = BASE_DIR / readme_rel
+    readme_status = subprocess.run(
+        [git_exe, '-C', str(BASE_DIR), 'status', '--porcelain', '--', readme_rel],
+        capture_output=True, text=True
+    )
+    if readme_status.returncode == 0 and readme_status.stdout.strip() and readme_path.exists():
+        try:
+            backup_dir = LOG_DIR / 'update_backups'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = backup_dir / f'README_before_update_{ts}.txt'
+            backup_path.write_bytes(readme_path.read_bytes())
+            print(f'  [update] README local backup saved: {backup_path}')
+        except Exception as e:
+            print(f'  [update] warning: could not backup README before overwrite: {e}')
+
+        # Discard local README changes so pull can overwrite with repo version.
+        restore_readme = subprocess.run(
+            [git_exe, '-C', str(BASE_DIR), 'restore', '--', readme_rel],
+            capture_output=True, text=True
+        )
+        if restore_readme.returncode != 0:
+            print(f'  [update] warning: could not restore README before pull: {restore_readme.stderr.strip()}')
+
     # If there are local changes, stash them temporarily so pull can proceed.
     stash_created = False
     status = subprocess.run(
