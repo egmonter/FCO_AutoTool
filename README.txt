@@ -71,11 +71,11 @@ TOOL 1 (FCO Automation):
            * Solar
            * CentOS Boot (optional: reboots system, boots via BootCentosDMR.efi,
                           login root/root, runs ifconfig check)
-         - If all SVOS content items are "no", it asks:
+       - If all SVOS content items are "no", it asks:
            * Run SVOS Boot check? (svosinfo response check)
-         - Then it asks CentOS separately:
-             * Run CentOS Boot Check?
-         - You can run only SVOS check, only CentOS, both, or any content combination.
+       - Then it asks CentOS separately:
+         * Run CentOS Boot Check?
+       - You can run only SVOS check, only CentOS, both, or any content combination.
 
 TOOL 2 (Boot SVOS only):
   - COM port → same as above
@@ -238,16 +238,9 @@ RESULTS AND LOGS
       MLC_TIMEOUT        = 2400s (40 min)
       SOLAR_TIMEOUT      = 1200s (20 min)
 
-  - CentOS Boot (optional content per QDF):
-      If enabled per QDF, the system reboots after FCO content and boots CentOS
-      via \\efi\\boot\\BootCentosDMR.efi (same BIOS->UEFI navigation flow).
-      - Login: root / root (prompt: dmr-bkc login:)
-      - Validation: runs ifconfig to ensure shell responsiveness
-      - Result (PASS/FAIL) is recorded in the QDF's result log
-      - For modes with pysv (1, 3/B, 4): triggers one final overwrite first
-      - For fused mode 2: simply sends reboot and proceeds to CentOS boot
-      
-      *** IMPORTANT: Mode 2 Reboot Failure Handling ***
+  - CentOS Boot Check details are documented in Tool 1 content + Tool 4 sections.
+
+  - IMPORTANT: Mode 2 Reboot Failure Handling (CentOS):
       In Mode 2 (fused unit without pysv), the SVOS 'reboot' command may fail.
       If reboot fails:
         1. The system will timeout waiting for BIOS screen
@@ -256,8 +249,8 @@ RESULTS AND LOGS
         3. Without power cycle, CentOS cannot boot
       The script will notify you when reboot is attempted, so you can be ready
       to execute pysv power cycle if needed.
-      
-      SPECIAL CASE: If ONLY CentOS Boot is selected (no SVOS tests):
+
+  - SPECIAL CASE: If ONLY CentOS Boot is selected (no SVOS tests):
       - boot_svos() runs but skips setup_fco_dir (no directory/file setup)
       - All SVOS tests are marked SKIPPED (not executed)
       - System reboots directly to CentOS boot

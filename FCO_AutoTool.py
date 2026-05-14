@@ -1304,6 +1304,7 @@ def _update_readme():
     Supported placeholders:
         __FCO_BASE_DIR__
         __FCO_BASE_DIR_RAW__
+        <FCO_AutoTool_path>
     """
     readme = BASE_DIR / 'README.txt'
     if not readme.exists():
@@ -1315,6 +1316,8 @@ def _update_readme():
         updated = content
         updated = updated.replace('__FCO_BASE_DIR__', path_str)
         updated = updated.replace('__FCO_BASE_DIR_RAW__', path_str)
+        # Backward compatibility with older README token.
+        updated = updated.replace('<FCO_AutoTool_path>', path_str)
 
         if updated != content:
             # Replace only explicit placeholders; do not rewrite generic README lines.
