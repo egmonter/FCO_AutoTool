@@ -1,0 +1,8 @@
+{
+  "_comment": "Parametros fijos del wrapper bs_wrap.main(). Edita aqui sin tocar el codigo.",
+  "proj":          "DMRUCC",
+  "stepping":      "a0",
+  "pwrgoodmethod": "usb",
+  "fused_unit":    false,
+  "pwrgooddelay":  30
+}
