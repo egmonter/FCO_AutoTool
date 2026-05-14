@@ -448,18 +448,13 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
 BIOS_NAV_RETRIES = 5  # maximum retries with ESC before giving up
 
 
-def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int):
+def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int, enable_nudge: bool = False):
     """
-    Actively waits for the BIOS screen. If no data arrives (unit already in BIOS
-    with a static screen), sends keys every BIOS_NUDGE_INTERVAL seconds to
-    force the firmware to redraw and send its content over serial.
-
-    Nudge sequence: ESC -> down arrow -> up arrow (cycling).
-    ESC is harmless in the main menu; arrows only move the selection,
-    which is corrected when entering the later navigate_bios_menu.
+    Waits for the BIOS screen.
+    If enable_nudge=True and no data arrives (static BIOS), sends a refresh key
+    every BIOS_NUDGE_INTERVAL seconds to force redraw over serial.
     """
-    nudge_keys = [b'\x1b', b'\x1b[B', b'\x1b[A']  # ESC, down, up
-    nudge_idx  = 0
+    nudge_key = b'\x1b[B'  # down arrow
     deadline   = time.time() + timeout
 
     while True:
@@ -479,14 +474,13 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int):
             raise BiosTimeoutError(
                 f'BIOS screen did not appear within {timeout}s ({timeout//60} min)')
 
-        key = nudge_keys[nudge_idx % len(nudge_keys)]
-        nudge_idx += 1
-        _status('Static BIOS screen — sending key to refresh...', 'wait')
-        s.send_key(key)
-        time.sleep(0.3)
+        if enable_nudge:
+            _status('Static BIOS screen — sending DOWN arrow to refresh...', 'wait')
+            s.send_key(nudge_key)
+            time.sleep(0.3)
 
 
-def boot_svos(s: SVOSSession, do_mountsv: bool = True):
+def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False):
     """
     Secuencia completa de arranque:
       BIOS (OAKSTREAM) -> Boot Manager Menu -> UEFI Internal Shell
@@ -499,8 +493,9 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True):
     s.flush()  # flush accumulated buffer during reboot
 
     _status('Looking for BIOS screen...', 'wait')
-    _status('(If the unit is already in BIOS, keys will be sent automatically to refresh)', 'info')
-    _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT)
+    if fused_nudge:
+        _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
+    _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
     _status('BIOS detected.', 'ok')
     time.sleep(1)
 
@@ -661,7 +656,7 @@ def boot_centos_direct(s: SVOSSession):
         return 'FAIL'
 
 
-def boot_centos(s: SVOSSession):
+def boot_centos(s: SVOSSession, fused_nudge: bool = False):
     """
     CentOS boot sequence:
       BIOS -> Boot Manager Menu -> UEFI Internal Shell
@@ -673,8 +668,9 @@ def boot_centos(s: SVOSSession):
     s.flush()
 
     _status('Looking for BIOS screen...', 'wait')
-    _status('(If the unit is already in BIOS, keys will be sent automatically to refresh)', 'info')
-    _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT)
+    if fused_nudge:
+        _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
+    _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
     _status('BIOS detected.', 'ok')
     time.sleep(1)
 
@@ -1482,7 +1478,6 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             print(f'  In your pysv session, run sv_automation.run_qdf_list(itp, sv, bs_wrap)')
             print(f'  Waiting for overwrite signal...')
             print()
-            _pause('TEST MODE: Press any key to continue (sv_automation must run normally; waiting real signal)...')
             
             # Wait for sv_done signal
             sv_done = SIGNAL_DIR / f'{signal_prefix}_sv_done.signal'
@@ -1496,9 +1491,10 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             
             # Write svos_done so sv_automation continues
             (SIGNAL_DIR / f'{signal_prefix}_svos_done.signal').write_text('done\n')
+            _pause('TEST MODE: Overwrite handshake completed. Press any key to continue to CentOS boot...')
         
         # Boot CentOS
-        boot_centos(s)
+        boot_centos(s, fused_nudge=(mode in (2, 3, 4)))
         _status('CentOS boot successful.', 'ok')
         _pause('CentOS boot OK — validate and press any key to continue...')
         return 'PASS'
@@ -1685,7 +1681,7 @@ def _open_serial(com_port: str) -> 'SVOSSession':
     """Runs the standalone SVOS flow for a fused QDF (without SV signals).
     Returns (log_path, overall, results)."""
     t0_boot = time.time()
-    boot_svos(s)
+    boot_svos(s, fused_nudge=True)
     setup_fco_dir(s, qdf, week)
     if CRONOS_MODE:
         _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot
@@ -1780,7 +1776,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             _status(f'Fuse overwrite of {qdf} completed. Starting SVOS...', 'ok')
 
             t0_boot = time.time()
-            boot_svos(s)
+            boot_svos(s, fused_nudge=(mode == 4))
             
             content = item.get('content')
             has_svos_tests = _has_svos_content(content)
@@ -1941,7 +1937,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
                 content_r = retry_item.get('content')
                 t0_boot_r = time.time()
-                boot_svos(s)
+                boot_svos(s, fused_nudge=(mode == 4))
                 has_svos_tests_r = _has_svos_content(content_r)
                 if has_svos_tests_r:
                     setup_fco_dir(s, qdf, week)
@@ -2060,7 +2056,7 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     No signal coordination with SV — the unit is already fused.
     Returns: (log_path, overall, result_content)
     """
-    boot_svos(s)
+    boot_svos(s, fused_nudge=(mode in (2, 3)))
     
     has_svos_tests = _has_svos_content(content)
     if has_svos_tests:
@@ -2218,7 +2214,6 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
     print()
     print(f'  Waiting for overwrite completion signal ({qdf}_sv_done.signal)...')
     print()
-    _pause('TEST MODE: Press a key to continue (sv_automation must run normally; waiting real signal)...')
 
     # Wait for the sv_done signal
     sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
@@ -2234,6 +2229,7 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
     svos_done = SIGNAL_DIR / f'{qdf}_svos_done.signal'
     svos_done.write_text('done\n')
     _status(f'svos_done signal written for {qdf}.', 'info')
+    _pause('TEST MODE: Overwrite handshake completed. Press any key to continue...')
 
 
 
@@ -2328,7 +2324,7 @@ def run_boot_svos_only(com_port: str):
     s = _open_serial(com_port)
     try:
         _pause('Ready to start SVOS boot. Press a key...')
-        boot_svos(s, do_mountsv=False)
+        boot_svos(s, do_mountsv=False, fused_nudge=fused)
         _status('SVOS ready — root@sut:/> active.', 'ok')
         _alert_popup_async('Boot SVOS OK',
                            'SVOS booteo correctamente y quedo activo en root@sut:/>.')
@@ -2407,7 +2403,7 @@ def run_update_svos(com_port: str):
         # 1. Boot SVOS
         _pause(f'Step {step}/{total_steps} — Boot SVOS. Press a key...')
         _status(f'Step {step}/{total_steps} — Boot SVOS...', 'step')
-        boot_svos(s, do_mountsv=False)
+        boot_svos(s, do_mountsv=False, fused_nudge=fused)
         _status('SVOS ready.', 'ok')
         step += 1
 
@@ -2456,7 +2452,7 @@ def run_update_svos(com_port: str):
                 # Not fused unit: reboot via bootscript
                 _status('Unit not fused — relaunching SVOS boot...', 'step')
                 s.flush()
-                boot_svos(s, do_mountsv=False)
+                boot_svos(s, do_mountsv=False, fused_nudge=fused)
                 _status('SVOS back after reboot.', 'ok')
             mountsv_ok = True
         step += 1
@@ -2561,7 +2557,7 @@ def run_boot_centos_direct(com_port: str):
             except Exception as e:
                 _status(f'Could not send reboot: {e}. Continuing with BIOS wait...', 'warn')
 
-        boot_centos(s)
+        boot_centos(s, fused_nudge=fused)
         _status('CentOS Boot: PASS', 'ok')
         _alert_popup_async('CentOS Boot OK',
                            'CentOS booteo correctamente (login + ifconfig).')
