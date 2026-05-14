@@ -31,16 +31,26 @@ Open a SEPARATE CMD/Python window and run:
   cd <FCO_AutoTool_path>
   python FCO_AutoTool.py
 
-At startup it will prompt for:
+At startup it will show the TOOLS MENU:
 
+  1 - FCO Automation          (fuse + test)
+  2 - Boot SVOS only
+  3 - Update SVOS             (osvsetrelease + osvosupdate)
+  4 - Boot CentOS only
+
+  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)
+
+
+Then, depending on the tool selected:
+
+TOOL 1 (FCO Automation):
   a) Execution mode:
        1 - Unit NOT fused   → overwrite + test           <- normal flow
        2 - Fused unit       → test the fused QDF only
        3 - Fused unit       → test fused FIRST, then overwrite other QDFs
        4 - Fused unit       → ignore fused, overwrite other QDFs only
 
-      Special prefix:
-        t1..t4  → activates TEST_MODE (pause between each test for manual validation)
+      Prefix 't' for TEST_MODE (e.g. t1, t2, t3, t4)
 
   b) COM port       → enter COM9, COM10 or COM11 (or just the number)
   c) Week           → enter the number, e.g.: 17 (or WW17)
@@ -53,8 +63,35 @@ At startup it will prompt for:
 
   e) Content to run per QDF:
        - Full content for all  → answer 'y'
-       - Or configure per QDF:
-           SuperCollider, Rocket (cpu/iax/dsa), Memicals, MLC, Solar
+       - Or configure per QDF (select at least one):
+           * SuperCollider
+           * Rocket (cpu/iax/dsa)
+           * Memicals
+           * MLC
+           * Solar
+           * CentOS Boot (optional: reboots system, boots via BootCentosDMR.efi,
+                          login root/root, runs ifconfig check)
+
+TOOL 2 (Boot SVOS only):
+  - COM port → same as above
+  - Asks if unit is fused
+  - If not fused: coordinates with sv_automation for overwrite
+  - Boots SVOS and leaves at root@sut:/> prompt
+
+TOOL 3 (Update SVOS):
+  - COM port → same as above
+  - Asks if unit is fused
+  - If not fused: coordinates with sv_automation for overwrite
+  - Boots SVOS, runs osvsetrelease + osvosupdate, verifies with svosinfo
+
+TOOL 4 (Boot CentOS only):
+  - COM port → same as above
+  - Assumes BootCentosDMR.efi is ALREADY EXECUTING (TEST mode)
+  - Skips BIOS navigation
+  - Waits for dmr-bkc login: prompt
+  - Logs in with root/root
+  - Runs ifconfig to validate
+  - Useful for quick validation after manual BIOS boot or scripted boot
 
 The script writes qdf_list.json with the entered parameters and then waits
 for the SV signal for each QDF. Do NOT close it.
@@ -194,3 +231,28 @@ RESULTS AND LOGS
       MEMIC_TIMEOUT      = 2400s (40 min)
       MLC_TIMEOUT        = 2400s (40 min)
       SOLAR_TIMEOUT      = 1200s (20 min)
+
+  - CentOS Boot (optional content per QDF):
+      If enabled per QDF, the system reboots after FCO content and boots CentOS
+      via \\efi\\boot\\BootCentosDMR.efi (same BIOS->UEFI navigation flow).
+      - Login: root / root (prompt: dmr-bkc login:)
+      - Validation: runs ifconfig to ensure shell responsiveness
+      - Result (PASS/FAIL) is recorded in the QDF's result log
+      - For modes with pysv (1, 3/B, 4): triggers one final overwrite first
+      - For fused mode 2: simply sends reboot and proceeds to CentOS boot
+      
+      *** IMPORTANT: Mode 2 Reboot Failure Handling ***
+      In Mode 2 (fused unit without pysv), the SVOS 'reboot' command may fail.
+      If reboot fails:
+        1. The system will timeout waiting for BIOS screen
+        2. You MUST run a POWER CYCLE in Python SV
+           Example: sv.pwr.pwrgood.cycle() or power_cycle() command
+        3. Without power cycle, CentOS cannot boot
+      The script will notify you when reboot is attempted, so you can be ready
+      to execute pysv power cycle if needed.
+      
+      SPECIAL CASE: If ONLY CentOS Boot is selected (no SVOS tests):
+      - boot_svos() runs but skips setup_fco_dir (no directory/file setup)
+      - All SVOS tests are marked SKIPPED (not executed)
+      - System reboots directly to CentOS boot
+      - Overall result = PASS if CentOS boot successful, FAIL otherwise

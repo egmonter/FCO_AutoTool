@@ -106,6 +106,8 @@ BIOS_NAV_MAX   = 20                    # maximum down-arrow presses before error
 # EFI Shell prompts (adjust if they differ on your platform)
 EFI_PROMPTS   = [b'Shell>', b'shell>', b'EFI Shell']
 SVOS_PROMPT   = b'root@sut:'  # SVOS shell prompt (without /> due to interleaved color codes)
+CENTOS_LOGIN_PROMPTS = [b'dmr-bkc login:', b' login:']
+CENTOS_SHELL_PROMPTS = [b'# ', b'root@', b'[root@']
 
 # Maximum time (seconds) to wait for long prompts
 BOOT_TIMEOUT     = 600   # boot until EFI shell (post-BIOS)       10 min
@@ -113,6 +115,7 @@ BIOS_REBOOT_WAIT = 10    # minimum wait before looking for BIOS (flush buffer)
 BIOS_WAIT_TIMEOUT= 900   # BIOS screen timeout before retry    15 min
 BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
 SVOS_TIMEOUT     = 600   # boot SVOS                               10 min
+CENTOS_BOOT_TIMEOUT = 600  # boot CentOS                           10 min
 MOUNTSV_TIMEOUT  = 1800  # mountsv                                 30 min
 CMD_TIMEOUT      = 120   # comandos normales                        2 min
 SC_TIMEOUT       = 600   # supercollider -M 5                      10 min
@@ -136,7 +139,7 @@ SOLAR_CMD = ('/usr/bin/solar/solar.sh /meshgv '
              '-ratioPUnit2f1 P0...Pn -ratioPUnit5f1 P0...Pn /log .')
 
 # Canonical content keys (display order for the user)
-CONTENT_TESTS = ('supercollider', 'rocket', 'memicals', 'mlc', 'solar')
+CONTENT_TESTS = ('supercollider', 'rocket', 'memicals', 'mlc', 'solar', 'centos_boot')
 
 # Display names per content key
 _CONTENT_DISPLAY = {
@@ -145,6 +148,7 @@ _CONTENT_DISPLAY = {
     'memicals':      'Memicals',
     'mlc':           'MLC',
     'solar':         'Solar',
+    'centos_boot':   'CentOS Boot (root/root + ifconfig)',
 }
 
 # Display commands for the result log (without file redirection)
@@ -158,6 +162,7 @@ CONTENT_CMDS = {
     'solar':           ('/usr/bin/solar/solar.sh /meshgv -ratioPUnit0 "" -ratioPUnit1 "" '
                         '-ratioPUnit2 P0...Pn -ratioPUnit3 "" -ratioPUnit4 "" '
                         '-ratioPUnit5 P0...Pn -ratioPUnit2f1 P0...Pn -ratioPUnit5f1 P0...Pn /log .'),
+    'centos_boot':     '\\efi\\boot\\BootCentosDMR.efi (login: root/root, ifconfig check)',
 }
 
 
@@ -604,6 +609,155 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True):
     _status('mountsv completed. SVOS mounted successfully.', 'ok')
 
 
+def boot_centos_direct(s: SVOSSession):
+    """
+    CentOS direct login (TEST mode).
+    Assumes BootCentosDMR.efi is already executing (BIOS navigation skipped).
+    Waits for login prompt, enters root/root, runs ifconfig.
+    """
+    _status('CentOS Direct Login mode (TEST) — waiting for login prompt...', 'wait')
+    
+    try:
+        with _guard('CentOS login prompt (direct mode)'):
+            s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
+        _status('Login prompt detected.', 'ok')
+        
+        _status('Entering user: root', 'step')
+        s.send('root')
+        
+        with _guard('prompt "Password:"'):
+            s.read_until_any(['Password:', 'password:'], timeout=30)
+        _status('Entering password...', 'step')
+        s.send('root')
+        
+        with _guard('CentOS shell prompt after login'):
+            s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
+        _status('CentOS login successful.', 'ok')
+        
+        _status('Running ifconfig to validate the OS...', 'step')
+        s.send('ifconfig')
+        with _guard('ifconfig response in CentOS'):
+            s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
+        _status('CentOS validated with ifconfig.', 'ok')
+        return 'PASS'
+        
+    except Exception as e:
+        _status(f'CentOS Direct login FAILED: {e}', 'fail')
+        logging.error(f'CentOS direct login failed: {e}', exc_info=True)
+        return 'FAIL'
+
+
+def boot_centos(s: SVOSSession):
+    """
+    CentOS boot sequence:
+      BIOS -> Boot Manager Menu -> UEFI Internal Shell
+      -> FS0/FS1/FS2 -> \\efi\\boot\\BootCentosDMR.efi -> login root/root
+      -> ifconfig (basic sanity check)
+    """
+    _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+    time.sleep(BIOS_REBOOT_WAIT)
+    s.flush()
+
+    _status('Looking for BIOS screen...', 'wait')
+    _status('(If the unit is already in BIOS, keys will be sent automatically to refresh)', 'info')
+    _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT)
+    _status('BIOS detected.', 'ok')
+    time.sleep(1)
+
+    for nav_retry in range(BIOS_NAV_RETRIES):
+        try:
+            _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
+            navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=1.0)
+
+            time.sleep(1.0)
+            _, screen_text = s.read_screen(wait=1.0)
+            if 'Maintenance' in screen_text and 'Boot Manager Menu' not in screen_text:
+                _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
+                s.send_escape()
+                time.sleep(1.5)
+                continue
+            _status('Inside Boot Manager Menu.', 'ok')
+
+            _status('Looking for UEFI Internal Shell...', 'step')
+            navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=1.0)
+            _status('UEFI Internal Shell selected.', 'ok')
+            break
+
+        except FCOStepError as e:
+            if nav_retry < BIOS_NAV_RETRIES - 1:
+                _status(f'Not found ({e}). ESC and retrying...', 'warn')
+                s.send_escape()
+                time.sleep(1.5)
+            else:
+                raise FCOStepError(
+                    f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
+                    f'Last error: {e}')
+
+    _status('Waiting for EFI Shell...', 'wait')
+    with _guard('EFI Shell prompt'):
+        s.read_until_any(EFI_PROMPTS, timeout=BOOT_TIMEOUT)
+    _status('EFI Shell ready.', 'ok')
+
+    booted = False
+    login_seen = False
+    for fs in ('FS0', 'FS1', 'FS2'):
+        _status(f'Trying {fs}: ...', 'step')
+        s.flush()
+        s.send(f'{fs}:')
+        try:
+            s.read_until(f'{fs}:\\', timeout=15)
+        except TimeoutError:
+            _status(f'{fs}: not available, trying next...', 'info')
+            continue
+
+        _status(f'Launching \\efi\\boot\\BootCentosDMR.efi from {fs}: ...', 'step')
+        s.send_slow('\\efi\\boot\\BootCentosDMR.efi', char_delay=0.05)
+
+        EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
+        try:
+            matched, _ = s.read_until_any(CENTOS_LOGIN_PROMPTS + EFI_PROMPT, timeout=10)
+            if matched in CENTOS_LOGIN_PROMPTS:
+                booted = True
+                login_seen = True
+                break
+            _status(f'BootCentosDMR.efi not found on {fs}: (prompt returned quickly), trying next...', 'info')
+            continue
+        except TimeoutError:
+            _status(f'BootCentosDMR.efi loading on {fs}:, waiting for login prompt...', 'wait')
+            s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
+            booted = True
+            login_seen = True
+            break
+
+    if not booted:
+        raise FCOStepError(
+            'Could not find \\efi\\boot\\BootCentosDMR.efi on FS0:, FS1: or FS2:. '
+            'Verify that the filesystem is available.')
+
+    if not login_seen:
+        _status('Waiting for CentOS login prompt...', 'wait')
+        with _guard('CentOS login prompt'):
+            s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
+
+    _status('Entering user: root', 'step')
+    s.send('root')
+
+    with _guard('prompt "Password:"'):
+        s.read_until_any(['Password:', 'password:'], timeout=30)
+    _status('Entering password...', 'step')
+    s.send('root')
+
+    with _guard('CentOS shell prompt after login'):
+        s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
+    _status('CentOS login successful.', 'ok')
+
+    _status('Running ifconfig to validate the OS boot...', 'step')
+    s.send('ifconfig')
+    with _guard('ifconfig response in CentOS'):
+        s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
+    _status('CentOS boot validated with ifconfig.', 'ok')
+
+
 # ---------------------------------------------------------------------------
 # Workflow per QDF
 # ---------------------------------------------------------------------------
@@ -788,6 +942,7 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
         'memicals',
         'mlc',
         'solar',
+        'centos_boot',
     ]
 
     def _add_cmd_lines(rows, name, cmd, status):
@@ -843,6 +998,7 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
             'mlc':            'MLC',
             'solar':          'Solar',
             'rocket_dsa':     'Rocket DSA',
+            'centos_boot':    'CentOS Boot',
         }
         LBL_W = 18
         DUR_W = 12
@@ -1083,7 +1239,7 @@ def _update_readme():
 # ---------------------------------------------------------------------------
 
 def _ask_mode() -> int:
-    """Shows the mode menu and returns the selected mode (1-4)."""
+    """Shows the mode menu and returns the selected mode (1-4). Supports t prefix for TEST_MODE."""
     global TEST_MODE
     print()
     print('=' * 60)
@@ -1095,12 +1251,15 @@ def _ask_mode() -> int:
     print('  3 - Fused unit           (test fused + then overwrite other QDFs)')
     print('  4 - Fused unit           (ignore fused, overwrite other QDFs only)')
     print()
+    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)')
+    print()
     while True:
         raw = input('Mode (1-4): ').strip().lower()
         if raw in ('1', '2', '3', '4'):
             return int(raw)
         if raw in ('t1', 't2', 't3', 't4'):
             TEST_MODE = True
+            print('  [TEST MODE activated]')
             return int(raw[1])
         print('  [!!] Enter 1, 2, 3 or 4.')
 
@@ -1161,6 +1320,103 @@ def _ask_qdf_params(label=''):
     return qdfs, ult0, soc, kwargs
 
 
+def _has_svos_content(content) -> bool:
+    """
+    Checks if there is any SVOS content to run (not just CentOS boot).
+    Returns True if there's at least one test other than centos_boot.
+    content=None means full content (True).
+    """
+    if content is None:
+        return True
+    return any(test in content for test in CONTENT_TESTS if test != 'centos_boot')
+
+
+def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = 'x4', 
+                     kwargs: dict = None, is_retry: bool = False) -> str:
+    """
+    Boots CentOS as part of the QDF content workflow.
+    For modes with pysv overwrite (1/3/4): triggers overwrite + reboot + boot CentOS.
+    For mode 2 (fused): sends reboot command + boots CentOS.
+    
+    *** IMPORTANT FOR MODE 2 (Fused unit without overwrite) ***
+    The SVOS 'reboot' command may fail. If reboot fails:
+      1. The system will timeout waiting for BIOS
+      2. You MUST run a power cycle using Python SV
+      3. Example: sv.pwr.pwrgood.cycle() or power_cycle() command
+    Without a power cycle, CentOS cannot boot successfully.
+    
+    Returns 'PASS' or 'FAIL'.
+    """
+    _status(f'Running CentOS boot (reboot + \\efi\\boot\\BootCentosDMR.efi + login)...', 'step')
+    
+    try:
+        # Reboot/overwrite preparation depends on mode and fused status
+        if mode == 2:
+            # Fused without pysv: just reboot
+            _status('Fused path: sending reboot command...', 'info')
+            if not is_retry:
+                print()
+                print('  [NOTE-MODE2] Reboot might fail in SVOS.')
+                print('  If it does, run POWER CYCLE in pysv:')
+                print('    sv.pwr.pwrgood.cycle() or equivalent power_cycle() command')
+                print()
+            try:
+                s.send('reboot')
+                time.sleep(1)
+            except Exception as e:
+                _status(f'Could not send reboot: {e}. Continuing with BIOS wait...', 'warn')
+        else:
+            # Modes with pysv (1, 3, 4): request one overwrite before CentOS
+            signal_prefix = f'{qdf}_centos' if is_retry else qdf
+            _status('pysv path: requesting final overwrite for CentOS boot...', 'info')
+            
+            # Clean signals
+            for name in [f'{signal_prefix}_sv_done.signal', f'{signal_prefix}_svos_done.signal']:
+                sig = SIGNAL_DIR / name
+                if sig.exists():
+                    sig.unlink()
+            
+            # Write qdf_list.json with signal prefix (so sv_automation knows this is for CentOS)
+            entry = {'qdf': qdf, 'ult0': ult0, 'soc': soc}
+            if kwargs:
+                entry['kwargs'] = kwargs
+            with open(QDF_LIST_FILE, 'w', encoding='utf-8') as f:
+                json.dump([entry], f, indent=2)
+            
+            print()
+            print('=' * 60)
+            print('  CentOS Boot — Requesting Overwrite')
+            print('=' * 60)
+            print(f'  In your pysv session, run sv_automation.run_qdf_list(itp, sv, bs_wrap)')
+            print(f'  Waiting for overwrite signal...')
+            print()
+            _pause('TEST MODE: Press any key to simulate sv_automation completed...')
+            
+            # Wait for sv_done signal
+            sv_done = SIGNAL_DIR / f'{signal_prefix}_sv_done.signal'
+            _wait_for_file(sv_done)
+            
+            if sv_done.read_text().strip() == 'error':
+                _status('sv_automation reported error in overwrite.', 'fail')
+                return 'FAIL'
+            
+            _status('Overwrite completed. Ready for CentOS boot.', 'ok')
+            
+            # Write svos_done so sv_automation continues
+            (SIGNAL_DIR / f'{signal_prefix}_svos_done.signal').write_text('done\n')
+        
+        # Boot CentOS
+        boot_centos(s)
+        _status('CentOS boot successful.', 'ok')
+        _pause('CentOS boot OK — validate and press any key to continue...')
+        return 'PASS'
+        
+    except Exception as e:
+        _status(f'CentOS boot FAILED: {e}', 'fail')
+        logging.error(f'CentOS boot failed for {qdf}: {e}', exc_info=True)
+        return 'FAIL'
+
+
 # ---------------------------------------------------------------------------
 # Content configuration per QDF
 # ---------------------------------------------------------------------------
@@ -1184,6 +1440,7 @@ def _ask_content_config(qdf_list):
         ('memicals',      'Memicals'),
         ('mlc',           'MLC'),
         ('solar',         'Solar'),
+        ('centos_boot',   'CentOS Boot (root/root + ifconfig)'),
     ]
 
     print()
@@ -1267,6 +1524,7 @@ def _print_last_config(cfg: dict):
         print(f'  TEST MODE: active')
     print(f'  COM:       {cfg.get("com_port", "?")}')
     print(f'  Week:    WW{cfg.get("week", "?")}')
+    print(f'  CentOS:    {"enabled" if cfg.get("boot_centos_after_fco") else "disabled"}')
 
     qdf_list = cfg.get('qdf_list') or []
     if qdf_list:
@@ -1399,7 +1657,7 @@ def _open_serial(com_port: str) -> 'SVOSSession':
 # Main loop (modes 1, 3-phase-B and 4): SV signals + SVOS boot + tests
 # ---------------------------------------------------------------------------
 
-def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: str) -> list:
+def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: str, mode: int) -> list:
     """Executes the SV signals + SVOS boot + tests loop with retry. Returns all_results."""
     all_results  = []
     retry_needed = []
@@ -1423,11 +1681,16 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
             t0_boot = time.time()
             boot_svos(s)
-            setup_fco_dir(s, qdf, week)
+            
+            content = item.get('content')
+            has_svos_tests = _has_svos_content(content)
+            
+            if has_svos_tests:
+                setup_fco_dir(s, qdf, week)
+            
             if CRONOS_MODE:
                 _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot
 
-            content = item.get('content')
             results = {}
 
             def _run_safe(name, fn, *args, _tkey=None):
@@ -1473,10 +1736,21 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             else:
                 results['rocket_dram_dsa'] = 'SKIPPED'
 
-            try:
-                run_parser(s)
-            except Exception as e:
-                _status(f'Parser failed: {e}', 'fail')
+            if has_svos_tests:
+                try:
+                    run_parser(s)
+                except Exception as e:
+                    _status(f'Parser failed: {e}', 'fail')
+
+            if _should_run(content, 'centos_boot'):
+                t0_centos = time.time()
+                centos_result = run_centos_boot(s, mode, qdf, ult0, item.get('soc', 'x4'),
+                                                item.get('kwargs'), is_retry=False)
+                if CRONOS_MODE:
+                    _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
+                results['centos_boot'] = centos_result
+            else:
+                results['centos_boot'] = 'SKIPPED'
 
             log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, LOG_DIR,
                                                   timings=_timings.get(qdf) if CRONOS_MODE else None,
@@ -1661,14 +1935,17 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
 
 def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
-                   content=None) -> tuple:
+                   content=None, mode=2, soc='x4', kwargs=None) -> tuple:
     """
     Runs tests on a fused unit (Modes 2 & 3, Phase A).
     No signal coordination with SV — the unit is already fused.
     Returns: (log_path, overall, result_content)
     """
     boot_svos(s)
-    setup_fco_dir(s, qdf, week)
+    
+    has_svos_tests = _has_svos_content(content)
+    if has_svos_tests:
+        setup_fco_dir(s, qdf, week)
 
     results = {}
 
@@ -1714,10 +1991,20 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     else:
         results['rocket_dram_dsa'] = 'SKIPPED'
 
-    try:
-        run_parser(s)
-    except Exception as e:
-        _status(f'Parser failed: {e}', 'fail')
+    if has_svos_tests:
+        try:
+            run_parser(s)
+        except Exception as e:
+            _status(f'Parser failed: {e}', 'fail')
+
+    if _should_run(content, 'centos_boot'):
+        t0_centos = time.time()
+        centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False)
+        if CRONOS_MODE:
+            _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
+        results['centos_boot'] = centos_result
+    else:
+        results['centos_boot'] = 'SKIPPED'
 
     log_path, overall, result_content = write_result_log(
         qdf, week, ult0, ifwi, results, LOG_DIR,
@@ -1822,6 +2109,9 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
     _status(f'svos_done signal written for {qdf}.', 'info')
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # SVOS utilities — tools menu
 # ---------------------------------------------------------------------------
@@ -1829,8 +2119,8 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
 def _ask_tool_menu() -> str:
     """
     Shows the main tools menu before the FCO flow.
-    Returns: 'fco' | 'boot' | 'update'
-    Prefix 't' activates TEST_MODE (e.g. t2, t3).
+    Returns: 'fco' | 'boot' | 'update' | 'centos_direct'
+    Prefix 't' activates TEST_MODE (e.g. t1, t2, t3, t4).
     """
     global TEST_MODE
     print()
@@ -1840,20 +2130,21 @@ def _ask_tool_menu() -> str:
     print()
     print('  1 - FCO Automation          (fuse + test)')
     print('  2 - Boot SVOS only')
-    print('  3 - Update SVOS         (osvsetrelease + osvosupdate)')
+    print('  3 - Update SVOS             (osvsetrelease + osvosupdate)')
+    print('  4 - Boot CentOS only')
     print()
-    print('  Prefix t for TEST MODE (e.g. t2, t3)')
+    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)')
     print()
-    _map = {'1': 'fco', '2': 'boot', '3': 'update'}
+    _map = {'1': 'fco', '2': 'boot', '3': 'update', '4': 'centos_direct'}
     while True:
-        raw = input('Tool (1-3): ').strip().lower()
+        raw = input('Tool (1-4): ').strip().lower()
         if raw.startswith('t') and raw[1:] in _map:
             TEST_MODE = True
             print('  [TEST MODE activated]')
             return _map[raw[1:]]
         if raw in _map:
             return _map[raw]
-        print('  [!!] Enter 1, 2 or 3.')
+        print('  [!!] Enter 1, 2, 3 or 4.')
 
 
 def _parse_svosinfo(text: str) -> dict:
@@ -2093,6 +2384,49 @@ def run_update_svos(com_port: str):
         _status(f'Port {com_port} closed.', 'info')
 
 
+def run_boot_centos_direct(com_port: str):
+    """
+    Tool 4: Boot CentOS only (TEST mode).
+    Assumes BootCentosDMR.efi is already executing (skip BIOS navigation).
+    Useful for quick testing when the boot media is already in progress.
+    """
+    print()
+    print('=' * 60)
+    print('  BOOT CENTOS ONLY (TEST MODE)')
+    print('=' * 60)
+    print()
+    print('  This mode assumes BootCentosDMR.efi is ALREADY EXECUTING.')
+    print('  It skips BIOS navigation and waits for the login prompt.')
+    print()
+
+    _status(f'Opening {com_port}...', 'step')
+    s = _open_serial(com_port)
+    try:
+        _pause('Ready to test CentOS direct login. Press a key...')
+        result = boot_centos_direct(s)
+        
+        if result == 'PASS':
+            _status('CentOS Direct Login: PASS', 'ok')
+            _alert_popup_async('CentOS Direct Boot OK',
+                               'CentOS login and ifconfig check passed successfully.')
+        else:
+            _status('CentOS Direct Login: FAIL', 'fail')
+            _alert_popup('CentOS Direct Boot FAILED',
+                        'CentOS login or validation failed.\nCheck console output for details.')
+
+        print()
+        print('=' * 60)
+        print('  TEST COMPLETED')
+        print('=' * 60)
+    except Exception as e:
+        _status(f'Error during CentOS direct test: {e}', 'fail')
+        logging.error(f'Boot CentOS direct failed: {e}', exc_info=True)
+        _alert_popup('CentOS Direct Boot FAILED', str(e))
+    finally:
+        s.close()
+        _status(f'Port {com_port} closed.', 'info')
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2117,8 +2451,8 @@ def main():
     # ---- Main tools menu ----
     tool = _ask_tool_menu()
 
-    if tool in ('boot', 'update'):
-        # SVOS tools: only request COM port (no week or FCO mode)
+    if tool in ('boot', 'update', 'centos_direct'):
+        # Tools that only need COM port (no week or FCO mode)
         print()
         com_port = input('COM port (e.g.: COM9 or just 9): ').strip()
         if not com_port.upper().startswith('COM'):
@@ -2126,8 +2460,10 @@ def main():
 
         if tool == 'boot':
             run_boot_svos_only(com_port)
-        else:
+        elif tool == 'update':
             run_update_svos(com_port)
+        else:  # tool == 'centos_direct'
+            run_boot_centos_direct(com_port)
 
         input('\nPress ENTER to close...')
         return
@@ -2220,7 +2556,7 @@ def main():
                 _status('        Waiting for SV to start the overwrite...', 'info')
 
             summary_ult0 = ult0
-            all_results  = _run_main_loop(s, qdf_list, week, ult0, ifwi)
+            all_results  = _run_main_loop(s, qdf_list, week, ult0, ifwi, mode)
 
         elif mode == 2:
             if use_last:
@@ -2256,9 +2592,16 @@ def main():
             print(f'\n{"="*60}')
             _status(f'Modo 2 — Testeando Fused QDF: {qdf}', 'step')
             print(f'{"="*60}')
+            print()
+            print('  [INFO] Mode 2: Fused unit only (no pysv overwrite)')
+            print('  If CentOS boot is selected, reboot is needed:')
+            print('    - SVOS reboot may fail')
+            print('    - If it fails, run power cycle in pysv')
+            print('    - Without power cycle, CentOS cannot boot')
+            print()
 
             log_path, overall, result_content = run_fused_test(s, qdf, ult0, week, ifwi,
-                                                               content=fused_content)
+                                                               content=fused_content, mode=mode)
             summary_ult0 = ult0
             all_results.append({'qdf': qdf, 'overall': overall, 'log': str(log_path),
                                  'result_content': result_content})
@@ -2329,7 +2672,8 @@ def main():
             print(f'{"="*60}')
 
             log_path_f, overall_f, result_content_f = run_fused_test(s, qdf_fused, ult0_f, week, ifwi,
-                                                                      content=fused_content_m3)
+                                                                      content=fused_content_m3, mode=mode,
+                                                                      soc=soc_f, kwargs=None)
             all_results.append({'qdf': qdf_fused, 'overall': overall_f, 'log': str(log_path_f),
                                  'result_content': result_content_f})
 
@@ -2351,7 +2695,7 @@ def main():
             print(f'{"="*60}')
 
             summary_ult0 = ult0_ow
-            loop_results = _run_main_loop(s, qdf_list, week, ult0_ow, ifwi)
+            loop_results = _run_main_loop(s, qdf_list, week, ult0_ow, ifwi, mode)
             all_results.extend(loop_results)
 
     except KeyboardInterrupt:
