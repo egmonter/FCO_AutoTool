@@ -1532,7 +1532,6 @@ def _ask_content_config(qdf_list):
         ('memicals',      'Memicals'),
         ('mlc',           'MLC'),
         ('solar',         'Solar'),
-        ('centos_boot',   'CentOS Boot (root/root + ifconfig)'),
     ]
 
     print()
@@ -1561,12 +1560,24 @@ def _ask_content_config(qdf_list):
                 r = input(f'    Run {label}? (y/n): ').strip().lower()
                 if r in ('s', 'y'):
                     selected.append(key)
+
+            # Ask SVOS check only when all base SVOS tests are NO.
             if not selected:
-                boot_only = input('    No content selected. Boot SVOS only (svosinfo check)? (y/n): ').strip().lower()
-                if boot_only in ('s', 'y'):
-                    selected = ['svos_boot']
-                else:
-                    print(f'  [!!] Select at least one test for {qdf}.')
+                run_svos_check = input(
+                    '    No SVOS content selected. Run SVOS Boot check? (y/n): '
+                ).strip().lower() in ('s', 'y')
+                if run_svos_check:
+                    selected.append('svos_boot')
+
+            # CentOS is asked separately.
+            run_centos = input(
+                '    Run CentOS Boot Check? (y/n): '
+            ).strip().lower() in ('s', 'y')
+            if run_centos:
+                selected.append('centos_boot')
+
+            if not selected:
+                print(f'  [!!] Select at least one test for {qdf}.')
 
         item['content'] = selected
         selected_display = ', '.join(_CONTENT_DISPLAY.get(k, k) for k in selected)
