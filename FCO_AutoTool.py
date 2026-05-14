@@ -1453,16 +1453,16 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             power_cycled_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycled.signal'
             _status(f'Waiting for pysv power cycle completion...', 'wait')
             _wait_for_file(power_cycled_signal)
+            
+            done_content = power_cycled_signal.read_text().strip()
+            if done_content == 'error':
+                _status('pysv reported error during power cycle.', 'fail')
+                return 'FAIL'
+            
             _status('Power cycle completed by pysv.', 'ok')
         else:
             # Modes with pysv (1, 3, 4): request wrapper to run for CentOS overwrite
             _status('Modes 1/3/4: Requesting wrapper execution from pysv...', 'info')
-            
-            # Clean previous signals
-            for name in [f'{qdf}_centos_wrapper.signal', f'{qdf}_centos_wrapper_done.signal']:
-                sig = SIGNAL_DIR / name
-                if sig.exists():
-                    sig.unlink()
             
             # Write wrapper request signal
             wrapper_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper.signal'
@@ -1777,7 +1777,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             _status(f'Fuse overwrite of {qdf} completed. Starting SVOS...', 'ok')
             
             # Clean CentOS power cycle signals from previous run (if any)
-            for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal']:
+            for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal',
+                            f'{qdf}_centos_wrapper.signal', f'{qdf}_centos_wrapper_done.signal']:
                 sig = SIGNAL_DIR / sig_name
                 if sig.exists():
                     sig.unlink()
