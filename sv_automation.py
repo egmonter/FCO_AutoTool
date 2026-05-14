@@ -153,8 +153,51 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     print("  MAIN LOOP COMPLETED")
     print("="*60)
 
-    # ---- PHASE 2: Retry if SVOS requests it (BIOS/MOUNTSV timeout) ----
+    # ---- PHASE 1.5: Idle loop — monitor CentOS power cycle + retry ----
+    # After main loop, pysv enters an idle loop where it:
+    #   1. Checks for Mode 2 CentOS power cycle requests (immediate)
+    #   2. Waits for retry_needed signal (timeout 30s, then loop back to check CentOS)
+    all_qdf_strs = [item['qdf'] for item in qdf_list]
     retry_signal = sig_dir / 'retry_needed.signal'
+    
+    while True:
+        print("\n  [IDLE] Monitoring for CentOS power cycle or retry requests...")
+        
+        # Check for CentOS power cycle signals
+        centos_handled = False
+        for qdf_str in all_qdf_strs:
+            power_cycle_sig = sig_dir / f'{qdf_str}_centos_power_cycle.signal'
+            if power_cycle_sig.exists():
+                centos_handled = True
+                print(f"\n  [CentOS-PC] Detected: {power_cycle_sig.name}")
+                try:
+                    from diamondrapids.toolext.bootscript.toolbox.power_control.power_controller \
+                        import PowerController
+                    pc = PowerController(power_controller_name='usb')
+                    print(f"  [CentOS-PC] Power OFF...")
+                    pc.power_off()
+                    print(f"  [CentOS-PC] Waiting 5s...")
+                    time.sleep(5)
+                    print(f"  [CentOS-PC] Power ON...")
+                    pc.power_on()
+                    print(f"  [CentOS-PC] Waiting 15s for system boot...")
+                    time.sleep(15)
+                    (sig_dir / f'{qdf_str}_centos_power_cycled.signal').write_text('done\n')
+                    print(f"  [CentOS-PC] Power cycle completed. Signal written: {qdf_str}_centos_power_cycled.signal")
+                except Exception as e:
+                    print(f"  [!!] Error during CentOS power cycle for {qdf_str}: {e}")
+                    (sig_dir / f'{qdf_str}_centos_power_cycled.signal').write_text('error\n')
+        
+        if centos_handled:
+            print("  [IDLE] CentOS power cycle handled. Returning to idle monitoring...\n")
+            continue
+        
+        # Wait for retry_needed with timeout (check every 30s for CentOS signals)
+        if _wait_for_file_timeout(retry_signal, poll=5, timeout=30):
+            break  # Exit idle loop, proceed with retry phase
+        # Timeout: loop back to check for CentOS signals again
+    
+    # ---- PHASE 2: Retry if SVOS requests it (BIOS/MOUNTSV timeout) ----
     if _wait_for_file_timeout(retry_signal, timeout=60):
         retry_json = sig_dir / 'retry_needed.json'
         retry_items = json.load(open(retry_json, encoding='utf-8'))

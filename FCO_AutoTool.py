@@ -1427,14 +1427,12 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
     """
     Boots CentOS as part of the QDF content workflow.
     For modes with pysv overwrite (1/3/4): triggers overwrite + reboot + boot CentOS.
-    For mode 2 (fused): sends reboot command + boots CentOS.
+    For mode 2 (fused): requests power cycle from pysv + boots CentOS.
     
-    *** IMPORTANT FOR MODE 2 (Fused unit without overwrite) ***
-    The SVOS 'reboot' command may fail. If reboot fails:
-      1. The system will timeout waiting for BIOS
-      2. You MUST run a power cycle using Python SV
-      3. Example: sv.pwr.pwrgood.cycle() or power_cycle() command
-    Without a power cycle, CentOS cannot boot successfully.
+    *** MODE 2 (Fused unit) WORKFLOW ***
+    1. Sends signal to pysv for power cycle (no reboot attempt)
+    2. Waits for power cycle completion signal
+    3. Boots CentOS via BIOS → UEFI → BootCentosDMR.efi
     
     Returns 'PASS' or 'FAIL'.
     """
@@ -1443,19 +1441,19 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
     try:
         # Reboot/overwrite preparation depends on mode and fused status
         if mode == 2:
-            # Fused without pysv: just reboot
-            _status('Fused path: sending reboot command...', 'info')
-            if not is_retry:
-                print()
-                print('  [NOTE-MODE2] Reboot might fail in SVOS.')
-                print('  If it does, run POWER CYCLE in pysv:')
-                print('    sv.pwr.pwrgood.cycle() or equivalent power_cycle() command')
-                print()
-            try:
-                s.send('reboot')
-                time.sleep(1)
-            except Exception as e:
-                _status(f'Could not send reboot: {e}. Continuing with BIOS wait...', 'warn')
+            # Fused without pysv: request power cycle from pysv
+            _status('Mode 2: Requesting power cycle from pysv...', 'info')
+            
+            # Write power cycle signal
+            power_cycle_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycle.signal'
+            power_cycle_signal.write_text('requested\n')
+            _status(f'Sent signal: {power_cycle_signal.name}', 'info')
+            
+            # Wait for power cycle completion
+            power_cycled_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycled.signal'
+            _status(f'Waiting for pysv power cycle completion...', 'wait')
+            _wait_for_file(power_cycled_signal)
+            _status('Power cycle completed by pysv.', 'ok')
         else:
             # Modes with pysv (1, 3, 4): request one overwrite before CentOS
             signal_prefix = f'{qdf}_centos' if is_retry else qdf
@@ -1788,6 +1786,12 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             if CRONOS_MODE:
                 _timings.setdefault(qdf, {})['overwrite_wait'] = time.time() - t0_ow
             _status(f'Fuse overwrite of {qdf} completed. Starting SVOS...', 'ok')
+            
+            # Clean CentOS power cycle signals from previous run (if any)
+            for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal']:
+                sig = SIGNAL_DIR / sig_name
+                if sig.exists():
+                    sig.unlink()
 
             t0_boot = time.time()
             boot_svos(s, fused_nudge=(mode == 4))

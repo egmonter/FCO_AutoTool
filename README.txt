@@ -240,15 +240,14 @@ RESULTS AND LOGS
 
   - CentOS Boot Check details are documented in Tool 1 content + Tool 4 sections.
 
-  - IMPORTANT: Mode 2 Reboot Failure Handling (CentOS):
-      In Mode 2 (fused unit without pysv), the SVOS 'reboot' command may fail.
-      If reboot fails:
-        1. The system will timeout waiting for BIOS screen
-        2. You MUST run a POWER CYCLE in Python SV
-           Example: sv.pwr.pwrgood.cycle() or power_cycle() command
-        3. Without power cycle, CentOS cannot boot
-      The script will notify you when reboot is attempted, so you can be ready
-      to execute pysv power cycle if needed.
+  - IMPORTANT: Mode 2 CentOS Boot (Automatic Power Cycle):
+      In Mode 2 (fused unit), SVOS 'reboot' command does not work.
+      Instead, FCO_AutoTool handles this automatically:
+        1. FCO_AutoTool sends signal to pysv: {QDF}_centos_power_cycle.signal
+        2. pysv immediately executes power cycle (short: 5s OFF → 15s boot wait)
+        3. pysv confirms with signal: {QDF}_centos_power_cycled.signal
+        4. FCO_AutoTool continues CentOS boot via BIOS → UEFI → BootCentosDMR.efi
+      No manual intervention needed for Mode 2 CentOS boot — pysv handles it.
 
   - SPECIAL CASE: If ONLY CentOS Boot is selected (no SVOS tests):
       - boot_svos() runs but skips setup_fco_dir (no directory/file setup)
