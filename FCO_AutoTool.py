@@ -1449,7 +1449,7 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             print(f'  In your pysv session, run sv_automation.run_qdf_list(itp, sv, bs_wrap)')
             print(f'  Waiting for overwrite signal...')
             print()
-            _pause('TEST MODE: Press any key to simulate sv_automation completed...')
+            _pause('TEST MODE: Press any key to continue (sv_automation must run normally; waiting real signal)...')
             
             # Wait for sv_done signal
             sv_done = SIGNAL_DIR / f'{signal_prefix}_sv_done.signal'
@@ -2150,7 +2150,7 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
     print()
     print(f'  Waiting for overwrite completion signal ({qdf}_sv_done.signal)...')
     print()
-    _pause('TEST MODE: Press a key to simulate that sv_automation completed the overwrite...')
+    _pause('TEST MODE: Press a key to continue (sv_automation must run normally; waiting real signal)...')
 
     # Wait for the sv_done signal
     sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
