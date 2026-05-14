@@ -77,6 +77,7 @@ TOOL 2 (Boot SVOS only):
   - Asks if unit is fused
   - If not fused: coordinates with sv_automation for overwrite
   - Boots SVOS and leaves at root@sut:/> prompt
+  - Keeps the tool window open after boot (Ctrl+C to close)
 
 TOOL 3 (Update SVOS):
   - COM port → same as above
@@ -91,6 +92,7 @@ TOOL 4 (Boot CentOS only):
   - If unit is fused: continues directly to CentOS boot
   - Boots via BIOS -> UEFI -> BootCentosDMR.efi
   - Validates with login root/root + ifconfig
+  - Keeps the tool window open after boot (Ctrl+C to close)
 
 The script writes qdf_list.json with the entered parameters and then waits
 for the SV signal for each QDF. Do NOT close it.

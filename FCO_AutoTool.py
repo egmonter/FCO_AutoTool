@@ -237,6 +237,18 @@ def _pause(msg: str = 'Press any key to continue...'):
     print()
 
 
+def _hold_open_until_interrupt(title: str):
+    """Keeps the tool alive after boot until user interrupts manually."""
+    print()
+    print('=' * 60)
+    print(f'  {title} READY')
+    print('=' * 60)
+    print('  Session is kept open. Press Ctrl+C to close this tool.')
+    print()
+    while True:
+        time.sleep(1)
+
+
 def _strip_ansi(data: bytes) -> str:
     """Strips ANSI escape codes from BIOS/terminal output."""
     text = data.decode('utf-8', errors='replace')
@@ -2262,10 +2274,15 @@ def run_boot_svos_only(com_port: str):
         _pause('Ready to start SVOS boot. Press a key...')
         boot_svos(s, do_mountsv=False)
         _status('SVOS ready — root@sut:/> active.', 'ok')
+        _alert_popup_async('Boot SVOS OK',
+                           'SVOS booteo correctamente y quedo activo en root@sut:/>.')
         print()
         print('=' * 60)
         print('  BOOT COMPLETED')
         print('=' * 60)
+        _hold_open_until_interrupt('SVOS')
+    except KeyboardInterrupt:
+        _status('Manual stop requested (Ctrl+C). Closing SVOS tool...', 'info')
     except Exception as e:
         _status(f'Error during SVOS boot: {e}', 'fail')
         logging.error(f'Boot SVOS failed: {e}', exc_info=True)
@@ -2491,12 +2508,15 @@ def run_boot_centos_direct(com_port: str):
         boot_centos(s)
         _status('CentOS Boot: PASS', 'ok')
         _alert_popup_async('CentOS Boot OK',
-                           'CentOS boot/login/ifconfig completed successfully.')
+                           'CentOS booteo correctamente (login + ifconfig).')
 
         print()
         print('=' * 60)
         print('  BOOT COMPLETED')
         print('=' * 60)
+        _hold_open_until_interrupt('CENTOS')
+    except KeyboardInterrupt:
+        _status('Manual stop requested (Ctrl+C). Closing CentOS tool...', 'info')
     except Exception as e:
         _status(f'Error during CentOS boot: {e}', 'fail')
         logging.error(f'Boot CentOS failed: {e}', exc_info=True)
@@ -2543,8 +2563,8 @@ def main():
             run_update_svos(com_port)
         else:  # tool == 'centos_direct'
             run_boot_centos_direct(com_port)
-
-        input('\nPress ENTER to close...')
+        if tool == 'update':
+            input('\nPress ENTER to close...')
         return
 
     # ---- From here: tool == 'fco' ----
