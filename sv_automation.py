@@ -116,7 +116,9 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
             prev_qdf  = qdf_list[i - 1]['qdf']
             svos_done = sig_dir / f'{prev_qdf}_svos_done.signal'
             print(f"  Waiting for SVOS to finish {prev_qdf}...")
-            _wait_for_file(svos_done)
+            _wait_for_svos_done_with_centos_support(
+                svos_done, sig_dir, bs_wrap, [prev_qdf]
+            )
             print(f"  SVOS ready. Continuing with {qdf}.")
 
         # Execute fuse overwrite
@@ -147,7 +149,9 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     last_qdf   = qdf_list[-1]['qdf']
     last_done  = sig_dir / f'{last_qdf}_svos_done.signal'
     print(f"\nWaiting for SVOS to finish the last QDF ({last_qdf})...")
-    _wait_for_file(last_done)
+    _wait_for_svos_done_with_centos_support(
+        last_done, sig_dir, bs_wrap, [last_qdf]
+    )
 
     print("\n" + "="*60)
     print("  MAIN LOOP COMPLETED")
@@ -163,66 +167,8 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     while True:
         print("\n  [IDLE] Monitoring for CentOS power cycle or wrapper requests...")
         
-        # Check for CentOS power cycle signals
-        centos_handled = False
-        for qdf_str in all_qdf_strs:
-            power_cycle_sig = sig_dir / f'{qdf_str}_centos_power_cycle.signal'
-            if power_cycle_sig.exists():
-                centos_handled = True
-                print(f"\n  [CentOS-PC] Detected: {power_cycle_sig.name}")
-                try:
-                    from diamondrapids.toolext.bootscript.toolbox.power_control.power_controller \
-                        import PowerController
-                    pc = PowerController(power_controller_name='usb')
-                    print(f"  [CentOS-PC] Power OFF...")
-                    pc.power_off()
-                    print(f"  [CentOS-PC] Waiting 5s...")
-                    time.sleep(5)
-                    print(f"  [CentOS-PC] Power ON...")
-                    pc.power_on()
-                    print(f"  [CentOS-PC] Waiting 15s for system boot...")
-                    time.sleep(15)
-                    (sig_dir / f'{qdf_str}_centos_power_cycled.signal').write_text('done\n')
-                    print(f"  [CentOS-PC] Power cycle completed. Signal written: {qdf_str}_centos_power_cycled.signal")
-                except Exception as e:
-                    print(f"  [!!] Error during CentOS power cycle for {qdf_str}: {e}")
-                    (sig_dir / f'{qdf_str}_centos_power_cycled.signal').write_text('error\n')
-        
-        if centos_handled:
+        if _handle_centos_requests(sig_dir, bs_wrap, all_qdf_strs):
             print("  [IDLE] CentOS power cycle handled. Returning to idle monitoring...\n")
-            continue
-        
-        # Check for CentOS wrapper signals (Mode 1/3/4)
-        wrapper_handled = False
-        for qdf_str in all_qdf_strs:
-            wrapper_sig = sig_dir / f'{qdf_str}_centos_wrapper.signal'
-            if wrapper_sig.exists():
-                wrapper_handled = True
-                print(f"\n  [CentOS-Wrapper] Detected: {wrapper_sig.name}")
-                try:
-                    # Parse wrapper parameters from signal file
-                    wrapper_params = json.loads(wrapper_sig.read_text().strip())
-                    qdf_w = wrapper_params.get('qdf', qdf_str)
-                    ult0_w = wrapper_params.get('ult0')
-                    soc_w = wrapper_params.get('soc', 'x4')
-                    kwargs_w = wrapper_params.get('kwargs', {})
-                    
-                    # Build full parameters
-                    all_params_w = dict(qdf=qdf_w, ult0=ult0_w, soc=soc_w, **FIXED_PARAMS)
-                    all_params_w.update(kwargs_w)
-                    
-                    print(f"  [CentOS-Wrapper] Executing wrapper for {qdf_w}...")
-                    params_str = ', '.join(f"{k}={v!r}" for k, v in all_params_w.items())
-                    print(f"  [CentOS-Wrapper] bs_wrap.main({params_str})")
-                    bs_wrap.main(**all_params_w)
-                    (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('done\n')
-                    print(f"  [CentOS-Wrapper] Wrapper execution completed. Signal written: {qdf_str}_centos_wrapper_done.signal")
-                except Exception as e:
-                    print(f"  [!!] Error during wrapper execution for {qdf_str}: {e}")
-                    (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('error\n')
-        
-        if wrapper_handled:
-            print("  [IDLE] CentOS wrapper handled. Returning to idle monitoring...\n")
             continue
         
         # Wait for retry_needed with timeout (check every 30s for CentOS signals)
@@ -314,6 +260,72 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
 
     bs_wrap.main(**all_params)
     print(f"  [OK] bs_wrap.main completed for {qdf}")
+
+
+def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
+    """Handles pending CentOS requests. Returns True if any request was processed."""
+    handled = False
+
+    for qdf_str in qdf_list:
+        power_cycle_sig = sig_dir / f'{qdf_str}_centos_power_cycle.signal'
+        if power_cycle_sig.exists():
+            handled = True
+            print(f"\n  [CentOS-PC] Detected: {power_cycle_sig.name}")
+            try:
+                from diamondrapids.toolext.bootscript.toolbox.power_control.power_controller \
+                    import PowerController
+                pc = PowerController(power_controller_name='usb')
+                print("  [CentOS-PC] Power OFF...")
+                pc.power_off()
+                print("  [CentOS-PC] Waiting 5s...")
+                time.sleep(5)
+                print("  [CentOS-PC] Power ON...")
+                pc.power_on()
+                print("  [CentOS-PC] Waiting 15s for system boot...")
+                time.sleep(15)
+                (sig_dir / f'{qdf_str}_centos_power_cycled.signal').write_text('done\n')
+                power_cycle_sig.unlink(missing_ok=True)
+                print(f"  [CentOS-PC] Power cycle completed. Signal written: {qdf_str}_centos_power_cycled.signal")
+            except Exception as e:
+                print(f"  [!!] Error during CentOS power cycle for {qdf_str}: {e}")
+                (sig_dir / f'{qdf_str}_centos_power_cycled.signal').write_text('error\n')
+                power_cycle_sig.unlink(missing_ok=True)
+
+    for qdf_str in qdf_list:
+        wrapper_sig = sig_dir / f'{qdf_str}_centos_wrapper.signal'
+        if wrapper_sig.exists():
+            handled = True
+            print(f"\n  [CentOS-Wrapper] Detected: {wrapper_sig.name}")
+            try:
+                wrapper_params = json.loads(wrapper_sig.read_text().strip())
+                qdf_w = wrapper_params.get('qdf', qdf_str)
+                ult0_w = wrapper_params.get('ult0')
+                soc_w = wrapper_params.get('soc', 'x4')
+                kwargs_w = wrapper_params.get('kwargs', {})
+
+                all_params_w = dict(qdf=qdf_w, ult0=ult0_w, soc=soc_w, **FIXED_PARAMS)
+                all_params_w.update(kwargs_w)
+
+                print(f"  [CentOS-Wrapper] Executing wrapper for {qdf_w}...")
+                params_str = ', '.join(f"{k}={v!r}" for k, v in all_params_w.items())
+                print(f"  [CentOS-Wrapper] bs_wrap.main({params_str})")
+                bs_wrap.main(**all_params_w)
+                (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('done\n')
+                wrapper_sig.unlink(missing_ok=True)
+                print(f"  [CentOS-Wrapper] Wrapper execution completed. Signal written: {qdf_str}_centos_wrapper_done.signal")
+            except Exception as e:
+                print(f"  [!!] Error during wrapper execution for {qdf_str}: {e}")
+                (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('error\n')
+                wrapper_sig.unlink(missing_ok=True)
+
+    return handled
+
+
+def _wait_for_svos_done_with_centos_support(svos_done, sig_dir, bs_wrap, qdf_list, poll=5):
+    """Waits for svos_done while servicing CentOS requests for the active QDF(s)."""
+    while not Path(svos_done).exists():
+        if not _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
+            time.sleep(poll)
 
 
 def _wait_for_file(filepath, poll=10):
