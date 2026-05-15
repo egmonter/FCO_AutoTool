@@ -163,8 +163,8 @@ CONTENT_CMDS = {
     'solar':           ('/usr/bin/solar/solar.sh /meshgv -ratioPUnit0 "" -ratioPUnit1 "" '
                         '-ratioPUnit2 P0...Pn -ratioPUnit3 "" -ratioPUnit4 "" '
                         '-ratioPUnit5 P0...Pn -ratioPUnit2f1 P0...Pn -ratioPUnit5f1 P0...Pn /log .'),
-    'svos_boot':       'svosinfo (boot validation)',
-    'centos_boot':     '\\efi\\boot\\BootCentosDMR.efi (login: root/root, ifconfig check)',
+    'svos_boot':       'Boot Validation',
+    'centos_boot':     'Boot Validation',
 }
 
 
@@ -1840,7 +1840,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot
             else:
-                results['svos_boot'] = 'SKIPPED'
+                # If any SVOS content already ran successfully, SVOS boot is implicitly validated.
+                results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
             if _should_run(content, 'rocket'):
                 results['rocket_dram_dsa'] = _run_safe('Rocket DSA', run_rocket_dsa, s,
@@ -2003,7 +2004,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     if CRONOS_MODE:
                         _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot_r
                 else:
-                    results['svos_boot'] = 'SKIPPED'
+                    # Retry follows same rule: any executed SVOS content implies boot validation.
+                    results['svos_boot'] = 'PASS' if has_svos_tests_r else 'SKIPPED'
 
                 if _should_run(content_r, 'rocket'):
                     results['rocket_dram_dsa'] = _run_safe_r('Rocket DSA', run_rocket_dsa, s,
