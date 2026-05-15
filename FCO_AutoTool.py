@@ -29,6 +29,10 @@ import datetime
 import contextlib
 from pathlib import Path
 
+# Windows keypress detection during timeouts
+if sys.platform == 'win32':
+    import msvcrt
+
 
 # ---------------------------------------------------------------------------
 # Custom exception
@@ -110,12 +114,12 @@ CENTOS_LOGIN_PROMPTS = [b'dmr-bkc login:', b' login:']
 CENTOS_SHELL_PROMPTS = [b'# ', b'root@', b'[root@']
 
 # Maximum time (seconds) to wait for long prompts
-BOOT_TIMEOUT     = 300   # boot until EFI shell (post-BIOS)        5 min
+BOOT_TIMEOUT     = 600   # boot until EFI shell (post-BIOS)       10 min
 BIOS_REBOOT_WAIT = 10    # minimum wait before looking for BIOS (flush buffer)
-BIOS_WAIT_TIMEOUT= 300   # BIOS screen timeout before retry        5 min
+BIOS_WAIT_TIMEOUT= 900   # BIOS screen timeout before retry    15 min
 BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
 SVOS_TIMEOUT     = 600   # boot SVOS                               10 min
-CENTOS_BOOT_TIMEOUT = 120  # boot CentOS                            2 min
+CENTOS_BOOT_TIMEOUT = 600  # boot CentOS                           10 min
 MOUNTSV_TIMEOUT  = 1800  # mountsv                                 30 min
 CMD_TIMEOUT      = 120   # comandos normales                        2 min
 SC_TIMEOUT       = 600   # supercollider -M 5                      10 min
@@ -298,6 +302,27 @@ def setup_logging(log_file):
 
 
 # ---------------------------------------------------------------------------
+# Keypress detection for timeout skip (Windows only)
+# ---------------------------------------------------------------------------
+
+def _check_skip_key():
+    """
+    Checks if user pressed a key to skip the timeout.
+    Returns True if a key was pressed (simulates timeout).
+    Only works on Windows with msvcrt.
+    """
+    if sys.platform != 'win32':
+        return False
+    
+    if msvcrt.kbhit():
+        key = msvcrt.getch()
+        _status('🔔 [USER SKIP] Timeout interrupted by keypress', 'step')
+        return True
+    
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Serial helper
 # ---------------------------------------------------------------------------
 
@@ -365,11 +390,17 @@ class SVOSSession:
     # ---- read ----
 
     def read_until(self, expected, timeout=CMD_TIMEOUT) -> bytes:
-        """Reads until `expected` is found. timeout=None waits indefinitely."""
+        """Reads until `expected` is found. timeout=None waits indefinitely.
+        User can press any key to skip the timeout (Windows only).
+        """
         if isinstance(expected, str):
             expected = expected.encode()
         deadline = (time.time() + timeout) if timeout is not None else None
         while True:
+            # Check if user pressed a key to skip timeout
+            if _check_skip_key():
+                raise TimeoutError(f'Timeout ({timeout}s) skipped by user keypress while waiting for: {expected!r}')
+            
             chunk = self.ser.read(512)
             if chunk:
                 self.buf += chunk
@@ -382,10 +413,16 @@ class SVOSSession:
             time.sleep(0.05)
 
     def read_until_any(self, patterns, timeout=CMD_TIMEOUT):
-        """Reads until any of the patterns is found. timeout=None waits indefinitely."""
+        """Reads until any of the patterns is found. timeout=None waits indefinitely.
+        User can press any key to skip the timeout (Windows only).
+        """
         enc = [p.encode() if isinstance(p, str) else p for p in patterns]
         deadline = (time.time() + timeout) if timeout is not None else None
         while True:
+            # Check if user pressed a key to skip timeout
+            if _check_skip_key():
+                raise TimeoutError(f'Timeout ({timeout}s) skipped by user keypress while waiting for patterns: {patterns}')
+            
             chunk = self.ser.read(512)
             if chunk:
                 self.buf += chunk
