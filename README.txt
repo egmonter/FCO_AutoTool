@@ -264,11 +264,11 @@ RESULTS AND LOGS
       - Overall result = PASS if CentOS boot successful, FAIL otherwise
 
   - KEYPRESS SKIP DURING TIMEOUT (Windows only):
-      When waiting for CentOS boot (or BIOS/EFI) and the system appears stuck in FF or
-      failed state, you can PRESS ANY KEY to immediately trigger the failure handling:
+      When waiting at "Looking for BIOS screen..." and the system appears stuck in FF or
+      failed state, you can PRESS 'S' to immediately trigger the failure handling:
       
       - Boot appears stuck (FF state visible in console)
-      - Press any key on your keyboard while FCO_AutoTool is waiting
+      - Press 's' on your keyboard while the BIOS screen wait is active
       - Skips the remaining timeout (e.g., from 10 min → immediate)
       - Displays interactive prompt: [s]kip, [r]etry, [a]bort
       - Choose action:

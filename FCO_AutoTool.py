@@ -307,8 +307,8 @@ def setup_logging(log_file):
 
 def _check_skip_key():
     """
-    Checks if user pressed a key to skip the timeout.
-    Returns True if a key was pressed (simulates timeout).
+    Checks if user pressed 's'/'S' to skip BIOS wait timeout.
+    Returns True only for 's' or 'S'.
     Only works on Windows with msvcrt.
     """
     if sys.platform != 'win32':
@@ -316,8 +316,9 @@ def _check_skip_key():
     
     if msvcrt.kbhit():
         key = msvcrt.getch()
-        _status('🔔 [USER SKIP] Timeout interrupted by keypress', 'step')
-        return True
+        if key in (b's', b'S'):
+            _status("[USER SKIP] BIOS wait interrupted by 's'", 'step')
+            return True
     
     return False
 
@@ -390,17 +391,11 @@ class SVOSSession:
     # ---- read ----
 
     def read_until(self, expected, timeout=CMD_TIMEOUT) -> bytes:
-        """Reads until `expected` is found. timeout=None waits indefinitely.
-        User can press any key to skip the timeout (Windows only).
-        """
+        """Reads until `expected` is found. timeout=None waits indefinitely."""
         if isinstance(expected, str):
             expected = expected.encode()
         deadline = (time.time() + timeout) if timeout is not None else None
         while True:
-            # Check if user pressed a key to skip timeout
-            if _check_skip_key():
-                raise TimeoutError(f'Timeout ({timeout}s) skipped by user keypress while waiting for: {expected!r}')
-            
             chunk = self.ser.read(512)
             if chunk:
                 self.buf += chunk
@@ -413,16 +408,10 @@ class SVOSSession:
             time.sleep(0.05)
 
     def read_until_any(self, patterns, timeout=CMD_TIMEOUT):
-        """Reads until any of the patterns is found. timeout=None waits indefinitely.
-        User can press any key to skip the timeout (Windows only).
-        """
+        """Reads until any of the patterns is found. timeout=None waits indefinitely."""
         enc = [p.encode() if isinstance(p, str) else p for p in patterns]
         deadline = (time.time() + timeout) if timeout is not None else None
         while True:
-            # Check if user pressed a key to skip timeout
-            if _check_skip_key():
-                raise TimeoutError(f'Timeout ({timeout}s) skipped by user keypress while waiting for patterns: {patterns}')
-            
             chunk = self.ser.read(512)
             if chunk:
                 self.buf += chunk
@@ -495,6 +484,9 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int, enable_nudge: bool =
     deadline   = time.time() + timeout
 
     while True:
+        if _check_skip_key():
+            raise BiosTimeoutError("BIOS screen wait skipped by user pressing 's'")
+
         remaining = deadline - time.time()
         if remaining <= 0:
             raise BiosTimeoutError(
@@ -530,6 +522,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
     s.flush()  # flush accumulated buffer during reboot
 
     _status('Looking for BIOS screen...', 'wait')
+    _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
     if fused_nudge:
         _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
     _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
@@ -705,6 +698,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
     s.flush()
 
     _status('Looking for BIOS screen...', 'wait')
+    _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
     if fused_nudge:
         _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
     _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
