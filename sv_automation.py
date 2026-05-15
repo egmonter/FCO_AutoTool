@@ -55,6 +55,25 @@ def _load_fixed_params() -> dict:
 FIXED_PARAMS = _load_fixed_params()
 
 
+def _centos_requested(item: dict) -> bool:
+    """
+    Returns True only when the QDF explicitly includes CentOS boot support.
+
+    Rules:
+    - content is missing -> False (e.g. Tool 2 Boot SVOS only handshake)
+    - content is None    -> True  (full content selected)
+    - content is list    -> True only if 'centos_boot' is present
+    """
+    if 'content' not in item:
+        return False
+    content = item.get('content')
+    if content is None:
+        return True
+    if isinstance(content, (list, tuple, set)):
+        return 'centos_boot' in content
+    return False
+
+
 def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     """
     Runs the fuse overwrite for each QDF/ULT in the list.
@@ -77,6 +96,9 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     print(f"  FCO Automation: {len(qdf_list)} QDF(s) in queue")
     print(f"  Signal dir: {sig_dir}")
     print(f"{'='*60}\n")
+
+    centos_monitor_enabled = any(_centos_requested(item) for item in qdf_list)
+    print(f"  CentOS idle monitoring: {'ENABLED' if centos_monitor_enabled else 'DISABLED'}")
 
     import users.mkcummin.mkc_fuse_utilities as fle  # noqa: F401
     import users.mkcummin.fle_bs_wrapper as bs_wrap  # noqa: F401
@@ -117,7 +139,7 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
             svos_done = sig_dir / f'{prev_qdf}_svos_done.signal'
             print(f"  Waiting for SVOS to finish {prev_qdf}...")
             _wait_for_svos_done_with_centos_support(
-                svos_done, sig_dir, bs_wrap, [prev_qdf]
+                svos_done, sig_dir, bs_wrap, [prev_qdf], centos_enabled=centos_monitor_enabled
             )
             print(f"  SVOS ready. Continuing with {qdf}.")
 
@@ -150,7 +172,7 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     last_done  = sig_dir / f'{last_qdf}_svos_done.signal'
     print(f"\nWaiting for SVOS to finish the last QDF ({last_qdf})...")
     _wait_for_svos_done_with_centos_support(
-        last_done, sig_dir, bs_wrap, [last_qdf]
+        last_done, sig_dir, bs_wrap, [last_qdf], centos_enabled=centos_monitor_enabled
     )
 
     print("\n" + "="*60)
@@ -164,17 +186,20 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     all_qdf_strs = [item['qdf'] for item in qdf_list]
     retry_signal = sig_dir / 'retry_needed.signal'
     
-    while True:
-        print("\n  [IDLE] Monitoring for CentOS power cycle or wrapper requests...")
-        
-        if _handle_centos_requests(sig_dir, bs_wrap, all_qdf_strs):
-            print("  [IDLE] CentOS power cycle handled. Returning to idle monitoring...\n")
-            continue
-        
-        # Wait for retry_needed with timeout (check every 30s for CentOS signals)
-        if _wait_for_file_timeout(retry_signal, poll=5, timeout=30):
-            break  # Exit idle loop, proceed with retry phase
-        # Timeout: loop back to check for CentOS signals again
+    if centos_monitor_enabled:
+        while True:
+            print("\n  [IDLE] Monitoring for CentOS power cycle or wrapper requests...")
+
+            if _handle_centos_requests(sig_dir, bs_wrap, all_qdf_strs):
+                print("  [IDLE] CentOS power cycle handled. Returning to idle monitoring...\n")
+                continue
+
+            # Wait for retry_needed with timeout (check every 30s for CentOS signals)
+            if _wait_for_file_timeout(retry_signal, poll=5, timeout=30):
+                break  # Exit idle loop, proceed with retry phase
+            # Timeout: loop back to check for CentOS signals again
+    else:
+        print("\n  [INFO] CentOS idle monitoring skipped (centos_boot not selected).")
     
     # ---- PHASE 2: Retry if SVOS requests it (BIOS/MOUNTSV timeout) ----
     if _wait_for_file_timeout(retry_signal, timeout=60):
@@ -321,11 +346,13 @@ def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
     return handled
 
 
-def _wait_for_svos_done_with_centos_support(svos_done, sig_dir, bs_wrap, qdf_list, poll=5):
+def _wait_for_svos_done_with_centos_support(svos_done, sig_dir, bs_wrap, qdf_list,
+                                            poll=5, centos_enabled=True):
     """Waits for svos_done while servicing CentOS requests for the active QDF(s)."""
     while not Path(svos_done).exists():
-        if not _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
-            time.sleep(poll)
+        if centos_enabled and _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
+            continue
+        time.sleep(poll)
 
 
 def _wait_for_file(filepath, poll=10):
