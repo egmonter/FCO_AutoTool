@@ -262,3 +262,22 @@ RESULTS AND LOGS
       - All SVOS tests are marked SKIPPED (not executed)
       - System reboots directly to CentOS boot
       - Overall result = PASS if CentOS boot successful, FAIL otherwise
+
+  - KEYPRESS SKIP DURING TIMEOUT (Windows only):
+      When waiting for CentOS boot (or BIOS/EFI) and the system appears stuck in FF or
+      failed state, you can PRESS ANY KEY to immediately trigger the failure handling:
+      
+      - Boot appears stuck (FF state visible in console)
+      - Press any key on your keyboard while FCO_AutoTool is waiting
+      - Skips the remaining timeout (e.g., from 10 min → immediate)
+      - Displays interactive prompt: [s]kip, [r]etry, [a]bort
+      - Choose action:
+          s = continue to next QDF (mark current as FAIL)
+          r = retry CentOS boot once more
+          a = abort the entire tool execution
+      
+      Benefits:
+      - No passive 15-minute waits when you see FF
+      - Immediate user response needed vs. timeout waiting
+      - Full control over next steps
+      - Result log correctly marks FAIL vs. PASS based on your choice
