@@ -185,6 +185,10 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     #   2. Waits for retry_needed signal (timeout 30s, then loop back to check CentOS)
     all_qdf_strs = [item['qdf'] for item in qdf_list]
     retry_signal = sig_dir / 'retry_needed.signal'
+
+    if not centos_monitor_enabled and not retry_signal.exists():
+        print("\n  [INFO] No CentOS monitoring and no retry requested. Exiting pysv helper.")
+        return
     
     if centos_monitor_enabled:
         while True:
