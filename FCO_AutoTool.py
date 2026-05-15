@@ -1933,13 +1933,19 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                                                   timings=_timings.get(qdf) if CRONOS_MODE else None,
                                                   content=content)
 
-            try:
-                summary_lines = [f'FCO WW{week} {qdf} - Overall: {overall}'] + \
-                                [f'{k}: {v}' for k, v in results.items()]
-                s.send(f'echo "{chr(10).join(summary_lines)}" > fco_result.txt')
-                s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
-            except Exception as e:
-                _status(f'Could not write fco_result.txt in SVOS: {e}', 'fail')
+            # Only write result to SVOS if we didn't boot CentOS (system is still in SVOS)
+            if results.get('centos_boot') not in ('PASS', 'FAIL'):
+                # CentOS was skipped or not run — we're still in SVOS, safe to write result
+                try:
+                    summary_lines = [f'FCO WW{week} {qdf} - Overall: {overall}'] + \
+                                    [f'{k}: {v}' for k, v in results.items()]
+                    s.send(f'echo "{chr(10).join(summary_lines)}" > fco_result.txt')
+                    s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+                except Exception as e:
+                    _status(f'Could not write fco_result.txt in SVOS: {e}', 'fail')
+            else:
+                # CentOS was booted successfully (PASS or FAIL) — system is in CentOS, not SVOS
+                _status(f'CentOS booted — result saved locally only (not writing to SVOS)', 'info')
 
             if overall == 'FAIL':
                 _status(f'QDF {qdf}: FAILED - see {log_path}', 'fail')
