@@ -110,12 +110,12 @@ CENTOS_LOGIN_PROMPTS = [b'dmr-bkc login:', b' login:']
 CENTOS_SHELL_PROMPTS = [b'# ', b'root@', b'[root@']
 
 # Maximum time (seconds) to wait for long prompts
-BOOT_TIMEOUT     = 600   # boot until EFI shell (post-BIOS)       10 min
+BOOT_TIMEOUT     = 300   # boot until EFI shell (post-BIOS)        5 min
 BIOS_REBOOT_WAIT = 10    # minimum wait before looking for BIOS (flush buffer)
-BIOS_WAIT_TIMEOUT= 900   # BIOS screen timeout before retry    15 min
+BIOS_WAIT_TIMEOUT= 300   # BIOS screen timeout before retry        5 min
 BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
 SVOS_TIMEOUT     = 600   # boot SVOS                               10 min
-CENTOS_BOOT_TIMEOUT = 600  # boot CentOS                           10 min
+CENTOS_BOOT_TIMEOUT = 120  # boot CentOS                            2 min
 MOUNTSV_TIMEOUT  = 1800  # mountsv                                 30 min
 CMD_TIMEOUT      = 120   # comandos normales                        2 min
 SC_TIMEOUT       = 600   # supercollider -M 5                      10 min
@@ -1492,7 +1492,40 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
     except Exception as e:
         _status(f'CentOS boot FAILED: {e}', 'fail')
         logging.error(f'CentOS boot failed for {qdf}: {e}', exc_info=True)
-        return 'FAIL'
+        
+        # Interactive prompt: allow user to skip, retry, or abort
+        print('\n' + '='*60)
+        print('  CentOS Boot Failed — Choose Action')
+        print('='*60)
+        print(f'  Error: {e}')
+        print()
+        print('  Options:')
+        print('    [s] Skip — continue to next QDF (mark as FAIL)')
+        print('    [r] Retry — attempt CentOS boot again')
+        print('    [a] Abort — exit tool completely')
+        print()
+        
+        while True:
+            choice = input('  Choice [s/r/a]: ').strip().lower()
+            if choice in ('s', 'skip'):
+                _status('Skipping to next QDF.', 'info')
+                return 'FAIL'
+            elif choice in ('r', 'retry'):
+                _status('Retrying CentOS boot...', 'step')
+                try:
+                    boot_centos(s, fused_nudge=(mode in (2, 3, 4)))
+                    _status('CentOS boot successful (retry).', 'ok')
+                    _pause('CentOS boot OK — validate and press any key to continue...')
+                    return 'PASS'
+                except Exception as e_retry:
+                    _status(f'Retry also FAILED: {e_retry}', 'fail')
+                    logging.error(f'CentOS boot retry failed for {qdf}: {e_retry}', exc_info=True)
+                    return 'FAIL'
+            elif choice in ('a', 'abort'):
+                _status('Aborting execution.', 'fail')
+                sys.exit(1)
+            else:
+                print('  Invalid choice. Enter s, r, or a.')
 
 
 # ---------------------------------------------------------------------------
