@@ -1496,14 +1496,8 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
     try:
         # Reboot/overwrite preparation depends on mode and fused status
         if mode == 2 and centos_only:
-            # CentOS-only: no SVOS tests ran, no pysv needed.
-            # Just send a soft reboot from the current shell and go straight to BIOS.
-            _status('CentOS-only: sending soft reboot via serial...', 'info')
-            try:
-                s.send('reboot')
-                time.sleep(1)
-            except Exception as e:
-                _status(f'Could not send reboot command: {e}. Continuing with BIOS wait...', 'warn')
+            # CentOS-only: no SVOS, no pysv needed — go straight to BIOS/CentOS navigation.
+            _status('CentOS-only: skipping reboot, navigating directly to CentOS...', 'info')
         elif mode == 2:
             # Mode 2 with SVOS tests: request hardware power cycle from pysv.
             _status('Mode 2: Requesting power cycle from pysv...', 'info')
