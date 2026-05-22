@@ -981,7 +981,8 @@ def get_ifwi_version() -> str:
 
 
 def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
-                     log_dir: Path, timings: dict = None, content=None):
+                     log_dir: Path, timings: dict = None, content=None, vid: str = '',
+                     ult_vid: str = ''):
     """Generates fco_result_{qdf}.txt in the script folder and in logs/."""
     log_dir.mkdir(parents=True, exist_ok=True)
     ts      = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1035,7 +1036,8 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
         '======================',
         f'Date/Time : {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
         f'Week      : WW{week}',
-        f'ULT       : {ult0}',
+        f'ULT/VID   : {ult_vid}' if ult_vid else f'ULT       : {ult0}',
+        f'VID       : {vid}' if vid else None,
         f'QDF       : {qdf}',
         f'IFWI      : {ifwi}',
         f'Selected  : {selected_str}',
@@ -1043,7 +1045,8 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
         '',
         f'  {"Content":<{NAME_W}} {"Command":<{CMD_W}}   Result',
         f'  {"-"*NAME_W} {"-"*CMD_W}   ------',
-    ] + _content_rows()
+    ]
+    lines = [ln for ln in lines if ln is not None] + _content_rows()
 
     content = '\n'.join(lines)
 
@@ -1085,7 +1088,8 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
     return local_path, overall, content
 
 
-def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_dir: Path):
+def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_dir: Path,
+                      vid: str = '', ult_vid: str = ''):
     """Generates FCO_SUMMARY_WW{week}.txt with the results for all QDFs."""
     log_dir.mkdir(parents=True, exist_ok=True)
     ts       = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1115,7 +1119,8 @@ def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_di
         '=====================',
         f'Date/Time : {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
         f'Week      : WW{week}',
-        f'ULT       : {ult0}',
+        f'ULT/VID   : {ult_vid}' if ult_vid else f'ULT       : {ult0}',
+        f'VID       : {vid}' if vid else None,
         f'IFWI      : {ifwi}',
         f'Overall   : {overall}',
         f'QDFs      : {len(all_results)}  '
@@ -1124,7 +1129,8 @@ def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_di
         '',
         f'  {"QDF":<{QDF_W}} {"Result":<{OV_W}}{hdr_dur} Log',
         f'  {"-"*QDF_W} {"-"*OV_W}{sep_dur} ---',
-    ] + rows
+    ]
+    lines = [ln for ln in lines if ln is not None] + rows
 
     content = '\n'.join(lines)
 
@@ -1442,6 +1448,22 @@ def _ask_qdf_params(label=''):
     return qdfs, ult0, soc, kwargs
 
 
+def _ask_single_qdf(label='') -> str:
+    """Prompts for a single QDF and returns it uppercase."""
+    label_str = f' {label}' if label else ''
+    while True:
+        qdf = input(f'QDF{label_str:<36}: ').strip().upper()
+        if qdf:
+            return qdf
+        print('  [!!] Enter a valid QDF.')
+
+
+def _ask_ult(label='') -> str:
+    """Prompts for ULT (single value)."""
+    label_str = f' {label}' if label else ''
+    return input(f'ULT{label_str:<36}: ').strip()
+
+
 def _has_svos_content(content) -> bool:
     """
     Checks if there is any SVOS content to run (not just CentOS boot).
@@ -1703,7 +1725,17 @@ def _print_last_config(cfg: dict):
 
     fused_qdf = cfg.get('fused_qdf')
     if fused_qdf:
-        print(f'  Fused QDF:  {fused_qdf}  ULT={cfg.get("fused_ult0")}  SOC={cfg.get("fused_soc")}')
+        fused_ult_vid = cfg.get('fused_ult_vid', '')
+        fused_vid = cfg.get('fused_vid', '')
+        if fused_ult_vid:
+            id_str = f'  ULT/VID={fused_ult_vid}'
+        elif cfg.get('fused_ult0') not in (None, ''):
+            id_str = f'  ULT={cfg.get("fused_ult0")}'
+        elif fused_vid:
+            id_str = f'  VID={fused_vid}'
+        else:
+            id_str = ''
+        print(f'  Fused QDF:  {fused_qdf}{id_str}  SOC={cfg.get("fused_soc")}')
         fc = cfg.get('fused_content')
         print(f'  Content:      {"full" if fc is None else ", ".join(fc)}')
 
@@ -2137,7 +2169,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
 
 def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
-                   content=None, mode=2, soc='x4', kwargs=None) -> tuple:
+                   content=None, mode=2, soc='x4', kwargs=None, vid: str = '',
+                   ult_vid: str = '') -> tuple:
     """
     Runs tests on a fused unit (Modes 2 & 3, Phase A).
     No signal coordination with SV — the unit is already fused.
@@ -2220,6 +2253,8 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         qdf, week, ult0, ifwi, results, LOG_DIR,
         timings=_timings.get(qdf) if CRONOS_MODE else None,
         content=content,
+        vid=vid,
+        ult_vid=ult_vid,
     )
 
     if overall == 'FAIL':
@@ -2737,7 +2772,9 @@ def main():
     logging.info(f'IFWI detected: {ifwi}')
 
     all_results   = []
-    summary_ult0  = 'N/A'
+    summary_ult0    = 'N/A'
+    summary_vid     = ''
+    summary_ult_vid = ''
     s             = None
 
     try:
@@ -2800,18 +2837,23 @@ def main():
             if use_last:
                 qdf           = _cfg_last['fused_qdf']
                 ult0          = _cfg_last['fused_ult0']
+                fused_ult_vid = _cfg_last.get('fused_ult_vid', _cfg_last.get('fused_ult0', ''))
+                fused_vid     = _cfg_last.get('fused_vid', '')
                 soc           = _cfg_last.get('fused_soc', 'x4')
                 fused_content = _cfg_last.get('fused_content')
-                print(f'\n  Fused QDF: {qdf}  ULT={ult0}  SOC={soc}')
+                print(f'\n  Fused QDF: {qdf}  ULT/VID={fused_ult_vid or "N/A"}  SOC={soc}')
                 content_str = 'full' if fused_content is None else ', '.join(fused_content)
                 print(f'  Content: {content_str}')
             else:
-                qdfs, ult0, soc, kwargs = _ask_qdf_params('(fused QDF)')
-                if not qdfs:
-                    print('\n[!!] ERROR: no QDF entered.')
-                    input('\nPress ENTER to close...')
-                    sys.exit(1)
-                qdf = qdfs[0]
+                print('\nEnter fused unit data for Mode 2:')
+                qdf = _ask_single_qdf('(fused)')
+                fused_ult_vid = input('ULT o VID (logs/summary only)        : ').strip()
+                if fused_ult_vid.upper() == 'N/A':
+                    fused_ult_vid = 'N/A'
+                ult0 = 'N/A'
+                fused_vid = ''
+                soc = 'x4'
+                kwargs = {}
                 _fused_list = [{'qdf': qdf}]
                 _ask_content_config(_fused_list)
                 fused_content = _fused_list[0].get('content')
@@ -2819,6 +2861,8 @@ def main():
                     'mode': mode, 'test_mode': TEST_MODE,
                     'com_port': com_port, 'week': week,
                     'fused_qdf': qdf, 'fused_ult0': ult0, 'fused_soc': soc,
+                    'fused_ult_vid': fused_ult_vid,
+                    'fused_vid': fused_vid,
                     'fused_kwargs': kwargs, 'fused_content': fused_content,
                 })
 
@@ -2839,8 +2883,12 @@ def main():
             print()
 
             log_path, overall, result_content = run_fused_test(s, qdf, ult0, week, ifwi,
-                                                               content=fused_content, mode=mode)
+                                                               content=fused_content, mode=mode,
+                                                               vid=fused_vid,
+                                                               ult_vid=fused_ult_vid)
             summary_ult0 = ult0
+            summary_vid = fused_vid
+            summary_ult_vid = fused_ult_vid
             all_results.append({'qdf': qdf, 'overall': overall, 'log': str(log_path),
                                  'result_content': result_content})
 
@@ -2862,13 +2910,8 @@ def main():
                     print(f'    {item["qdf"]:<12}  ULT={item["ult0"]}  content={c_str}')
             else:
                 # PHASE A: fused QDF
-                print('\n[Phase A] Enter the fused QDF to test first:')
-                qdfs_f, ult0_f, soc_f, _ = _ask_qdf_params('(fused QDF)')
-                if not qdfs_f:
-                    print('\n[!!] ERROR: no fused QDF entered.')
-                    input('\nPress ENTER to close...')
-                    sys.exit(1)
-                qdf_fused = qdfs_f[0]
+                print('\n[Phase A] Enter fused QDF to test first:')
+                qdf_fused = _ask_single_qdf('(fused)')
 
                 # Content configuration for the fused QDF
                 print('\n[Phase A Content] Configure the tests for the fused QDF:')
@@ -2877,12 +2920,17 @@ def main():
                 fused_content_m3 = _fused_list_m3[0].get('content')
 
                 # PHASE B: QDFs to overwrite
-                print('\n[Phase B] Enter the additional QDFs to overwrite after the fused test:')
+                print('\n[Phase B] Enter QDFs to overwrite after the fused test:')
+                print('          (ULT here is shared with the fused unit)')
                 qdfs_ow, ult0_ow, soc_ow, kwargs_ow = _ask_qdf_params('(QDFs to overwrite)')
                 if not qdfs_ow:
                     print('\n[!!] ERROR: no QDFs to overwrite entered.')
                     input('\nPress ENTER to close...')
                     sys.exit(1)
+
+                # Reuse overwrite ULT/SOC for fused-phase metadata/log context.
+                ult0_f = ult0_ow
+                soc_f = soc_ow
 
                 qdf_list = [{'qdf': q, 'ult0': ult0_ow, 'soc': soc_ow, 'kwargs': kwargs_ow}
                             for q in qdfs_ow]
@@ -2952,7 +3000,8 @@ def main():
     # ---- Summary file for all QDFs ----
     if all_results:
         try:
-            summary_path = write_summary_log(week, summary_ult0, ifwi, all_results, LOG_DIR)
+            summary_path = write_summary_log(week, summary_ult0, ifwi, all_results, LOG_DIR,
+                                             vid=summary_vid, ult_vid=summary_ult_vid)
             _status(f'Summary saved: {summary_path.name}', 'ok')
         except Exception as e:
             _status(f'Could not write the summary: {e}', 'fail')
