@@ -66,12 +66,15 @@ def _guard(step_desc: str):
 
 
 def _alert_popup(title: str, msg: str):
-    """Blocking Windows popup + prints to console."""
+    """Non-blocking warning popup + prints to console."""
+    import threading
     print(f'\n[!!] {title}\n     {msg}\n', flush=True)
-    try:
-        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
-    except Exception:
-        pass
+    def _show():
+        try:
+            ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
+        except Exception:
+            pass
+    threading.Thread(target=_show, daemon=True).start()
 
 
 def _alert_popup_async(title: str, msg: str):
@@ -1411,7 +1414,7 @@ def _ask_qdf_params(label=''):
     label: additional text for the prompt, e.g. '(fused QDF)' or '(QDFs to overwrite)'"""
     label_str = f' {label}' if label else ''
     print()
-    print(f'Enter the QDFs{label_str} separados por coma.')
+    print(f'Enter the QDFs{label_str} separated by commas.')
     print('  Example: Q9WK, QABC, QXYZ')
     qdfs_raw = input(f'QDFs{label_str:<35}: ').strip()
     qdfs = [q.strip().upper() for q in qdfs_raw.split(',') if q.strip()]
@@ -2354,8 +2357,8 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
 
     content = sv_done.read_text(encoding='utf-8').strip()
     if content == 'error':
-        raise FCOStepError(f'sv_automation reporto error en el overwrite de {qdf}. '
-                           f'Revisa la consola de pysv.')
+        raise FCOStepError(f'sv_automation reported an error during the overwrite of {qdf}. '
+                           f'Check the pysv console.')
     _status(f'Overwrite of {qdf} completed by sv_automation.', 'ok')
 
     # Write svos_done so sv_automation does not remain blocked waiting
@@ -2374,7 +2377,7 @@ def _show_mode2_centos_pysv_instructions(qdf: str):
         '  import sys',
         f"  sys.path.insert(0, r'{BASE_DIR}')",
         '  import sv_automation',
-        '  sv_automation.run_mode2_centos_monitor(bs_wrap)',
+        '  sv_automation.run_mode2_centos_monitor()',
         '',
         'Leave it running while FCO_AutoTool executes SVOS content.',
         f"It will wait for {qdf}_svos_done.signal and then handle power cycle automatically.",
@@ -2392,7 +2395,7 @@ def _show_mode2_centos_pysv_instructions(qdf: str):
         'import sys\n'
         f"sys.path.insert(0, r'{BASE_DIR}')\n"
         'import sv_automation\n'
-        'sv_automation.run_mode2_centos_monitor(bs_wrap)\n\n'
+        'sv_automation.run_mode2_centos_monitor()\n\n'
         'Keep it running. It waits for svos_done and performs power cycle automatically.'
     )
     _alert_popup('Mode 2 CentOS — pysv required', popup_msg)
@@ -2920,13 +2923,13 @@ def main():
             s = _open_serial(com_port)
 
             print(f'\n{"="*60}')
-            _status(f'Modo 2 — Testeando Fused QDF: {qdf}', 'step')
+            _status(f'Mode 2 — Testing fused QDF: {qdf}', 'step')
             print(f'{"="*60}')
             print()
-            print('  [INFO] Mode 2: Fused unit only (no pysv overwrite)')
-            print('  If CentOS boot is selected, run pysv monitor once:')
+            print('  [INFO] Mode 2: fused unit only (no pysv overwrite)')
+            print('  If CentOS boot is selected, run the pysv monitor once:')
             print('    - It waits for svos_done automatically')
-            print('    - Then it performs power cycle automatically')
+            print('    - Then it performs the power cycle automatically')
             print('    - This keeps traceability similar to mode 1')
             print()
 

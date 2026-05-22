@@ -267,10 +267,10 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
         print("\n  [INFO] No QDFs for retry.")
 
 
-def run_mode2_centos_monitor(bs_wrap, qdf=None, signal_dir=None):
+def run_mode2_centos_monitor(qdf=None, signal_dir=None):
     """
     Mode 2 helper: waits for {qdf}_svos_done.signal, then handles one CentOS
-    power-cycle/wrapper request for that fused QDF and exits.
+    power-cycle request for that fused QDF and exits.
 
     This function does NOT execute fuse overwrite.
     """
@@ -304,8 +304,6 @@ def run_mode2_centos_monitor(bs_wrap, qdf=None, signal_dir=None):
         f'{qdf}_svos_done.signal',
         f'{qdf}_centos_power_cycle.signal',
         f'{qdf}_centos_power_cycled.signal',
-        f'{qdf}_centos_wrapper.signal',
-        f'{qdf}_centos_wrapper_done.signal',
     ]:
         sig = sig_dir / name
         if sig.exists():
@@ -314,13 +312,34 @@ def run_mode2_centos_monitor(bs_wrap, qdf=None, signal_dir=None):
 
     svos_done = sig_dir / f'{qdf}_svos_done.signal'
     print(f'  Waiting for SVOS completion signal: {svos_done.name}')
-    _wait_for_svos_done_with_centos_support(
-        svos_done, sig_dir, bs_wrap, [qdf], centos_enabled=True
-    )
+    _wait_for_file(svos_done, poll=2)
     print('  SVOS completion detected. Monitoring CentOS request...')
 
+    power_cycle_sig = sig_dir / f'{qdf}_centos_power_cycle.signal'
+    power_cycled_sig = sig_dir / f'{qdf}_centos_power_cycled.signal'
+
     while True:
-        if _handle_centos_requests(sig_dir, bs_wrap, [qdf]):
+        if power_cycle_sig.exists():
+            print(f"\n  [CentOS-PC] Detected: {power_cycle_sig.name}")
+            try:
+                from diamondrapids.toolext.bootscript.toolbox.power_control.power_controller \
+                    import PowerController
+                pc = PowerController(power_controller_name='usb')
+                print("  [CentOS-PC] Power OFF...")
+                pc.power_off()
+                print("  [CentOS-PC] Waiting 30s...")
+                time.sleep(30)
+                print("  [CentOS-PC] Power ON...")
+                pc.power_on()
+                print("  [CentOS-PC] Waiting 15s for system boot...")
+                time.sleep(15)
+                power_cycled_sig.write_text('done\n')
+                power_cycle_sig.unlink(missing_ok=True)
+                print(f"  [CentOS-PC] Power cycle completed. Signal written: {power_cycled_sig.name}")
+            except Exception as e:
+                print(f"  [!!] Error during CentOS power cycle for {qdf}: {e}")
+                power_cycled_sig.write_text('error\n')
+                power_cycle_sig.unlink(missing_ok=True)
             print('  CentOS request handled. Exiting Mode 2 monitor.')
             return
         time.sleep(2)
