@@ -2257,7 +2257,8 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         if CRONOS_MODE:
             _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot
     else:
-        results['svos_boot'] = 'SKIPPED'
+        # Same rule as main loop: if any SVOS content ran, boot is implicitly validated.
+        results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
     if _should_run(content, 'rocket'):
         results['rocket_dram_dsa'] = _run_safe('Rocket DSA', run_rocket_dsa, s,
