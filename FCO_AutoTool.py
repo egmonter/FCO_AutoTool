@@ -1481,25 +1481,31 @@ def _has_svos_content(content) -> bool:
 
 
 def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = 'x4', 
-                     kwargs: dict = None, is_retry: bool = False) -> str:
+                     kwargs: dict = None, is_retry: bool = False,
+                     centos_only: bool = False) -> str:
     """
     Boots CentOS as part of the QDF content workflow.
     For modes with pysv overwrite (1/3/4): triggers overwrite + reboot + boot CentOS.
-    For mode 2 (fused): requests power cycle from pysv + boots CentOS.
-    
-    *** MODE 2 (Fused unit) WORKFLOW ***
-    1. Sends signal to pysv for power cycle (no reboot attempt)
-    2. Waits for power cycle completion signal
-    3. Boots CentOS via BIOS → UEFI → BootCentosDMR.efi
-    
+    For mode 2 (fused, with SVOS tests): requests power cycle from pysv + boots CentOS.
+    For mode 2 (centos_only=True): sends soft reboot via serial, no pysv needed.
+
     Returns 'PASS' or 'FAIL'.
     """
     _status(f'Running CentOS boot (reboot + \\efi\\boot\\BootCentosDMR.efi + login)...', 'step')
     
     try:
         # Reboot/overwrite preparation depends on mode and fused status
-        if mode == 2:
-            # Fused without pysv: request power cycle from pysv
+        if mode == 2 and centos_only:
+            # CentOS-only: no SVOS tests ran, no pysv needed.
+            # Just send a soft reboot from the current shell and go straight to BIOS.
+            _status('CentOS-only: sending soft reboot via serial...', 'info')
+            try:
+                s.send('reboot')
+                time.sleep(1)
+            except Exception as e:
+                _status(f'Could not send reboot command: {e}. Continuing with BIOS wait...', 'warn')
+        elif mode == 2:
+            # Mode 2 with SVOS tests: request hardware power cycle from pysv.
             _status('Mode 2: Requesting power cycle from pysv...', 'info')
 
             # Clean stale signals to avoid false-positive completion.
@@ -2266,13 +2272,16 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
             _status(f'Parser failed: {e}', 'fail')
 
     if _should_run(content, 'centos_boot'):
-        if mode == 2:
-            # Let pysv monitor know SVOS phase is complete before CentOS reboot request.
+        if mode == 2 and needs_svos:
+            # SVOS tests ran: let pysv monitor know SVOS phase is complete
+            # so it can do the hardware power cycle before CentOS.
             svos_done_signal = SIGNAL_DIR / f'{qdf}_svos_done.signal'
             svos_done_signal.write_text('done\n')
             _status(f'Mode 2: signal written for pysv monitor: {svos_done_signal.name}', 'info')
         t0_centos = time.time()
-        centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False)
+        # centos_only=True means skip pysv entirely and do a soft reboot from SVOS.
+        centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False,
+                                        centos_only=(mode == 2 and not needs_svos))
         if CRONOS_MODE:
             _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
         results['centos_boot'] = centos_result
