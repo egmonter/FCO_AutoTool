@@ -1881,8 +1881,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             wait_for_signal(sv_done)
             if CRONOS_MODE:
                 _timings.setdefault(qdf, {})['overwrite_wait'] = time.time() - t0_ow
-            _status(f'Fuse overwrite of {qdf} completed. Starting SVOS...', 'ok')
-            
+            _status(f'Fuse overwrite of {qdf} completed.', 'ok')
+
             # Clean CentOS power cycle signals from previous run (if any)
             for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal',
                             f'{qdf}_centos_wrapper.signal', f'{qdf}_centos_wrapper_done.signal']:
@@ -2068,14 +2068,20 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
             try:
                 wait_for_signal(SIGNAL_DIR / f'{qdf}_retry_sv_done.signal')
-                _status(f'Retry overwrite of {qdf} completed. Booting SVOS...', 'ok')
+                _status(f'Retry overwrite of {qdf} completed.', 'ok')
 
                 content_r = retry_item.get('content')
-                t0_boot_r = time.time()
-                boot_svos(s, fused_nudge=(mode == 4))
                 has_svos_tests_r = _has_svos_content(content_r)
-                if has_svos_tests_r:
-                    setup_fco_dir(s, qdf, week)
+                needs_svos_r = content_r is None or any(
+                    t in content_r for t in CONTENT_TESTS if t != 'centos_boot'
+                )
+                t0_boot_r = time.time()
+                if needs_svos_r:
+                    boot_svos(s, fused_nudge=(mode == 4))
+                    if has_svos_tests_r:
+                        setup_fco_dir(s, qdf, week)
+                else:
+                    _status('CentOS-only retry: skipping SVOS boot.', 'info')
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot_r
 
