@@ -1496,6 +1496,12 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
         if mode == 2:
             # Fused without pysv: request power cycle from pysv
             _status('Mode 2: Requesting power cycle from pysv...', 'info')
+
+            # Clean stale signals to avoid false-positive completion.
+            for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal']:
+                sig = SIGNAL_DIR / sig_name
+                if sig.exists():
+                    sig.unlink()
             
             # Write power cycle signal
             power_cycle_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycle.signal'
@@ -2241,6 +2247,11 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
             _status(f'Parser failed: {e}', 'fail')
 
     if _should_run(content, 'centos_boot'):
+        if mode == 2:
+            # Let pysv monitor know SVOS phase is complete before CentOS reboot request.
+            svos_done_signal = SIGNAL_DIR / f'{qdf}_svos_done.signal'
+            svos_done_signal.write_text('done\n')
+            _status(f'Mode 2: signal written for pysv monitor: {svos_done_signal.name}', 'info')
         t0_centos = time.time()
         centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False)
         if CRONOS_MODE:
@@ -2352,6 +2363,39 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
     svos_done.write_text('done\n')
     _status(f'svos_done signal written for {qdf}.', 'info')
     _pause('TEST MODE: Overwrite handshake completed. Press any key to continue...')
+
+
+def _show_mode2_centos_pysv_instructions(qdf: str):
+    """Shows instructions to run pysv monitor for Mode 2 CentOS power cycle automation."""
+    msg_lines = [
+        'ACTION REQUIRED — Mode 2 CentOS Power Cycle Automation',
+        '',
+        'In your pysv session, run:',
+        '  import sys',
+        f"  sys.path.insert(0, r'{BASE_DIR}')",
+        '  import sv_automation',
+        '  sv_automation.run_mode2_centos_monitor(bs_wrap)',
+        '',
+        'Leave it running while FCO_AutoTool executes SVOS content.',
+        f"It will wait for {qdf}_svos_done.signal and then handle power cycle automatically.",
+    ]
+
+    print()
+    print('=' * 60)
+    for ln in msg_lines:
+        print(ln)
+    print('=' * 60)
+    print()
+
+    popup_msg = (
+        'Mode 2 CentOS selected. In pysv run:\n\n'
+        'import sys\n'
+        f"sys.path.insert(0, r'{BASE_DIR}')\n"
+        'import sv_automation\n'
+        'sv_automation.run_mode2_centos_monitor(bs_wrap)\n\n'
+        'Keep it running. It waits for svos_done and performs power cycle automatically.'
+    )
+    _alert_popup('Mode 2 CentOS — pysv required', popup_msg)
 
 
 
@@ -2869,6 +2913,10 @@ def main():
             logging.info(f'COM: {com_port} | Mode: 2 | Week: WW{week} | '
                          f'ULT: {ult0} | Fused QDF: {qdf}')
 
+            # Persist fused mode-2 context so pysv monitor can auto-detect QDF.
+            with open(QDF_LIST_FILE, 'w', encoding='utf-8') as f:
+                json.dump([{'qdf': qdf, 'ult0': ult0, 'soc': soc, 'content': fused_content}], f, indent=2)
+
             s = _open_serial(com_port)
 
             print(f'\n{"="*60}')
@@ -2876,11 +2924,14 @@ def main():
             print(f'{"="*60}')
             print()
             print('  [INFO] Mode 2: Fused unit only (no pysv overwrite)')
-            print('  If CentOS boot is selected, reboot is needed:')
-            print('    - SVOS reboot may fail')
-            print('    - If it fails, run power cycle in pysv')
-            print('    - Without power cycle, CentOS cannot boot')
+            print('  If CentOS boot is selected, run pysv monitor once:')
+            print('    - It waits for svos_done automatically')
+            print('    - Then it performs power cycle automatically')
+            print('    - This keeps traceability similar to mode 1')
             print()
+
+            if _should_run(fused_content, 'centos_boot'):
+                _show_mode2_centos_pysv_instructions(qdf)
 
             log_path, overall, result_content = run_fused_test(s, qdf, ult0, week, ifwi,
                                                                content=fused_content, mode=mode,

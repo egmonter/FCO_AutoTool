@@ -267,6 +267,65 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
         print("\n  [INFO] No QDFs for retry.")
 
 
+def run_mode2_centos_monitor(bs_wrap, qdf=None, signal_dir=None):
+    """
+    Mode 2 helper: waits for {qdf}_svos_done.signal, then handles one CentOS
+    power-cycle/wrapper request for that fused QDF and exits.
+
+    This function does NOT execute fuse overwrite.
+    """
+    sig_dir = Path(signal_dir) if signal_dir else SIGNAL_DIR
+    sig_dir.mkdir(parents=True, exist_ok=True)
+    if qdf is None or str(qdf).strip() == '':
+        try:
+            with open(QDF_LIST_FILE, encoding='utf-8') as f:
+                items = json.load(f)
+            if not items:
+                raise ValueError('qdf_list.json is empty')
+            qdf = str(items[0].get('qdf', '')).strip().upper()
+        except Exception as e:
+            raise ValueError(
+                'Unable to auto-detect QDF from qdf_list.json. '
+                f'Provide qdf explicitly or run FCO_AutoTool Mode 2 first. ({e})'
+            )
+    else:
+        qdf = str(qdf).strip().upper()
+
+    if not qdf:
+        raise ValueError('qdf is required for run_mode2_centos_monitor')
+
+    print(f"\n{'='*60}")
+    print(f"  Mode 2 CentOS Monitor — QDF={qdf}")
+    print(f"  Signal dir: {sig_dir}")
+    print(f"{'='*60}\n")
+
+    # Remove stale signals from previous runs.
+    for name in [
+        f'{qdf}_svos_done.signal',
+        f'{qdf}_centos_power_cycle.signal',
+        f'{qdf}_centos_power_cycled.signal',
+        f'{qdf}_centos_wrapper.signal',
+        f'{qdf}_centos_wrapper_done.signal',
+    ]:
+        sig = sig_dir / name
+        if sig.exists():
+            sig.unlink()
+            print(f'  [cleanup] Previous signal removed: {name}')
+
+    svos_done = sig_dir / f'{qdf}_svos_done.signal'
+    print(f'  Waiting for SVOS completion signal: {svos_done.name}')
+    _wait_for_svos_done_with_centos_support(
+        svos_done, sig_dir, bs_wrap, [qdf], centos_enabled=True
+    )
+    print('  SVOS completion detected. Monitoring CentOS request...')
+
+    while True:
+        if _handle_centos_requests(sig_dir, bs_wrap, [qdf]):
+            print('  CentOS request handled. Exiting Mode 2 monitor.')
+            return
+        time.sleep(2)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
