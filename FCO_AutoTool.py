@@ -2951,14 +2951,19 @@ def main():
             _status(f'Mode 2 — Testing fused QDF: {qdf}', 'step')
             print(f'{"="*60}')
             print()
+            _needs_svos = fused_content is None or any(
+                t in fused_content for t in CONTENT_TESTS if t != 'centos_boot'
+            )
             print('  [INFO] Mode 2: fused unit only (no pysv overwrite)')
-            print('  If CentOS boot is selected, run the pysv monitor once:')
-            print('    - It waits for svos_done automatically')
-            print('    - Then it performs the power cycle automatically')
-            print('    - This keeps traceability similar to mode 1')
+            if _should_run(fused_content, 'centos_boot') and _needs_svos:
+                print('  CentOS boot selected with SVOS tests: run the pysv monitor once:')
+                print('    - It waits for svos_done automatically')
+                print('    - Then it performs the power cycle automatically')
+            elif _should_run(fused_content, 'centos_boot'):
+                print('  CentOS-only: no pysv needed, navigating BIOS directly.')
             print()
 
-            if _should_run(fused_content, 'centos_boot'):
+            if _should_run(fused_content, 'centos_boot') and _needs_svos:
                 _show_mode2_centos_pysv_instructions(qdf)
 
             log_path, overall, result_content = run_fused_test(s, qdf, ult0, week, ifwi,
