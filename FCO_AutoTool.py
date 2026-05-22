@@ -95,6 +95,7 @@ def _alert_popup_async(title: str, msg: str):
 BASE_DIR      = Path(__file__).parent
 SIGNAL_DIR    = BASE_DIR / 'signals'
 LOG_DIR       = BASE_DIR / 'logs'
+REPORTS_DIR   = LOG_DIR / 'reports'
 QDF_LIST_FILE    = BASE_DIR / 'qdf_list.json'
 LAST_CONFIG_FILE = BASE_DIR / 'last_config.json'
 
@@ -984,9 +985,9 @@ def get_ifwi_version() -> str:
 
 
 def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
-                     log_dir: Path, timings: dict = None, content=None, vid: str = '',
+                     log_dir: Path = REPORTS_DIR, timings: dict = None, content=None, vid: str = '',
                      ult_vid: str = ''):
-    """Generates fco_result_{qdf}.txt in the script folder and in logs/."""
+    """Generates fco_result_{qdf}.txt in logs/reports/ and archives it there."""
     log_dir.mkdir(parents=True, exist_ok=True)
     ts      = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     overall = 'PASS' if all(v == 'PASS' for v in results.values() if v != 'SKIPPED') else 'FAIL'
@@ -1079,11 +1080,11 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
         t_rows.append(f'  {"TOTAL":<{LBL_W}} {_fmt_dur(total):>{DUR_W}}')
         content += '\n' + '\n'.join(['', 'Timing', '------'] + t_rows)
 
-    # In the script folder (easy to find)
-    local_path = BASE_DIR / f'fco_result_{qdf}.txt'
+    # Store the latest result and the timestamped archive in logs/reports.
+    log_dir.mkdir(parents=True, exist_ok=True)
+    local_path = log_dir / f'fco_result_{qdf}.txt'
     local_path.write_text(content, encoding='utf-8')
 
-    # In logs/ with timestamp (history)
     archive_path = log_dir / f'FCO_WW{week}_{qdf}_{ts}.txt'
     archive_path.write_text(content, encoding='utf-8')
 
@@ -1091,9 +1092,9 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
     return local_path, overall, content
 
 
-def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_dir: Path,
+def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_dir: Path = REPORTS_DIR,
                       vid: str = '', ult_vid: str = ''):
-    """Generates FCO_SUMMARY_WW{week}.txt with the results for all QDFs."""
+    """Generates FCO_SUMMARY_WW{week}.txt with the results for all QDFs in logs/reports/."""
     log_dir.mkdir(parents=True, exist_ok=True)
     ts       = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     all_pass = all(r['overall'] in ('PASS', 'RETRY_PASS') for r in all_results)
@@ -1144,8 +1145,9 @@ def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_di
         if rc:
             content += divider + rc
 
-    local_path   = BASE_DIR / f'fco_summary_WW{week}.txt'
-    archive_path = log_dir  / f'FCO_SUMMARY_WW{week}_{ts}.txt'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    local_path   = log_dir / f'fco_summary_WW{week}.txt'
+    archive_path = log_dir / f'FCO_SUMMARY_WW{week}_{ts}.txt'
     local_path.write_text(content,   encoding='utf-8')
     archive_path.write_text(content, encoding='utf-8')
 
@@ -1842,7 +1844,7 @@ def _open_serial(com_port: str) -> 'SVOSSession':
         _status(f'Parser failed: {e}', 'fail')
 
     timings = _timings.get(qdf) if CRONOS_MODE else None
-    log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, LOG_DIR,
+    log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, REPORTS_DIR,
                                                          timings=timings, content=content)
 
     if overall == 'FAIL':
@@ -1888,15 +1890,21 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 if sig.exists():
                     sig.unlink()
 
-            t0_boot = time.time()
-            boot_svos(s, fused_nudge=(mode == 4))
-            
             content = item.get('content')
             has_svos_tests = _has_svos_content(content)
-            
-            if has_svos_tests:
-                setup_fco_dir(s, qdf, week)
-            
+            # Skip SVOS boot when only CentOS is selected.
+            needs_svos = content is None or any(
+                t in content for t in CONTENT_TESTS if t != 'centos_boot'
+            )
+
+            t0_boot = time.time()
+            if needs_svos:
+                boot_svos(s, fused_nudge=(mode == 4))
+                if has_svos_tests:
+                    setup_fco_dir(s, qdf, week)
+            else:
+                _status('CentOS-only content: skipping SVOS boot.', 'info')
+
             if CRONOS_MODE:
                 _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot
 
@@ -1970,7 +1978,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             else:
                 results['centos_boot'] = 'SKIPPED'
 
-            log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, LOG_DIR,
+            log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, REPORTS_DIR,
                                                   timings=_timings.get(qdf) if CRONOS_MODE else None,
                                                   content=content)
 
@@ -2130,7 +2138,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     except Exception as e:
                         _status(f'Parser failed in retry: {e}', 'fail')
 
-                log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, LOG_DIR,
+                log_path, overall, result_content = write_result_log(qdf, week, ult0, ifwi, results, REPORTS_DIR,
                                                      timings=_timings.get(qdf) if CRONOS_MODE else None,
                                                      content=content_r)
                 retry_overall = f'RETRY_{overall}'
@@ -2185,11 +2193,19 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     No signal coordination with SV — the unit is already fused.
     Returns: (log_path, overall, result_content)
     """
-    boot_svos(s, fused_nudge=(mode in (2, 3)))
-    
+    # Only boot SVOS if there is at least one SVOS test (or svos_boot) selected.
+    # If the user chose CentOS-only, skip SVOS entirely and go straight to power cycle.
+    needs_svos = content is None or any(
+        t in content for t in CONTENT_TESTS if t != 'centos_boot'
+    )
     has_svos_tests = _has_svos_content(content)
-    if has_svos_tests:
-        setup_fco_dir(s, qdf, week)
+
+    if needs_svos:
+        boot_svos(s, fused_nudge=(mode in (2, 3)))
+        if has_svos_tests:
+            setup_fco_dir(s, qdf, week)
+    else:
+        _status('CentOS-only content: skipping SVOS boot.', 'info')
 
     results = {}
 
@@ -2264,7 +2280,7 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         results['centos_boot'] = 'SKIPPED'
 
     log_path, overall, result_content = write_result_log(
-        qdf, week, ult0, ifwi, results, LOG_DIR,
+        qdf, week, ult0, ifwi, results, REPORTS_DIR,
         timings=_timings.get(qdf) if CRONOS_MODE else None,
         content=content,
         vid=vid,
@@ -3054,7 +3070,7 @@ def main():
     # ---- Summary file for all QDFs ----
     if all_results:
         try:
-            summary_path = write_summary_log(week, summary_ult0, ifwi, all_results, LOG_DIR,
+            summary_path = write_summary_log(week, summary_ult0, ifwi, all_results, REPORTS_DIR,
                                              vid=summary_vid, ult_vid=summary_ult_vid)
             _status(f'Summary saved: {summary_path.name}', 'ok')
         except Exception as e:
