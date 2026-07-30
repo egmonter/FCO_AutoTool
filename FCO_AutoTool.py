@@ -477,6 +477,15 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
 
 BIOS_NAV_RETRIES = 5  # maximum retries with ESC before giving up
 
+# Internal Shell countdown handling (to prevent startup.nsh auto-jump to FS0)
+INT_SHELL_COUNTDOWN_TIMEOUT = 25  # seconds
+INT_SHELL_COUNTDOWN_HINTS = [
+    b'Press ESC',
+    b'press esc',
+    b'startup.nsh',
+    b'to skip startup.nsh',
+]
+
 
 def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int, enable_nudge: bool = False):
     """
@@ -511,6 +520,41 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int, enable_nudge: bool =
             _status('Static BIOS screen — sending DOWN arrow to refresh...', 'wait')
             s.send_key(nudge_key)
             time.sleep(0.3)
+
+
+def _break_internal_shell_countdown(s: SVOSSession, timeout: int = INT_SHELL_COUNTDOWN_TIMEOUT) -> bool:
+    """
+    Watches serial output right after selecting Internal Shell and sends ESC
+    when the startup.nsh countdown appears.
+
+    Returns True if ESC was sent, False otherwise.
+    """
+    _status('Watching Internal Shell countdown (ESC before auto FS0)...', 'wait')
+    esc_sent = False
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        chunk = s.ser.read(512)
+        if chunk:
+            s.buf += chunk
+            s._print(chunk)
+
+            if (not esc_sent) and any(h in s.buf for h in INT_SHELL_COUNTDOWN_HINTS):
+                _status('Countdown detected. Sending ESC to stop startup.nsh auto-run...', 'step')
+                s.send_escape()
+                esc_sent = True
+
+            low = s.buf.lower()
+            if b'shell>' in low or b'efi shell' in low or b'fs0:' in low or b'fs1:' in low or b'fs2:' in low:
+                break
+
+        time.sleep(0.05)
+
+    if esc_sent:
+        _status('ESC sent for Internal Shell countdown.', 'ok')
+    else:
+        _status('No countdown text detected; continuing with normal EFI shell wait.', 'info')
+    return esc_sent
 
 
 def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False):
@@ -564,10 +608,11 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                     f'Could not navigate BIOS after {BIOS_NAV_RETRIES} intentos. '
                     f'Last error: {e}')
 
-    # 4. Wait for EFI Shell prompt
+    # 4. Break Internal Shell countdown (if present), then wait for prompt
+    _break_internal_shell_countdown(s)
     _status('Waiting for EFI Shell...', 'wait')
     with _guard('EFI Shell prompt'):
-        s.read_until_any(EFI_PROMPTS, timeout=BOOT_TIMEOUT)
+        s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
     _status('EFI Shell ready.', 'ok')
 
     # 5. Look for BootSVOS.efi on FS0, FS1, FS2
@@ -738,9 +783,10 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                     f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
                     f'Last error: {e}')
 
+    _break_internal_shell_countdown(s)
     _status('Waiting for EFI Shell...', 'wait')
     with _guard('EFI Shell prompt'):
-        s.read_until_any(EFI_PROMPTS, timeout=BOOT_TIMEOUT)
+        s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
     _status('EFI Shell ready.', 'ok')
 
     booted = False
@@ -1469,6 +1515,17 @@ def _ask_ult(label='') -> str:
     return input(f'ULT{label_str:<36}: ').strip()
 
 
+def _ask_skip_boot_if_in_svos() -> bool:
+    """
+    Asks whether to skip the initial SVOS boot when the user already has an
+    active SVOS shell on the serial console.
+    """
+    print()
+    print('Skip initial boot if already in SVOS shell? (root@sut:/>)')
+    resp = input('Skip boot (y/n): ').strip().lower()
+    return resp in ('s', 'y', 'yes')
+
+
 def _has_svos_content(content) -> bool:
     """
     Checks if there is any SVOS content to run (not just CentOS boot).
@@ -1861,10 +1918,13 @@ def _open_serial(com_port: str) -> 'SVOSSession':
 # Main loop (modes 1, 3-phase-B and 4): SV signals + SVOS boot + tests
 # ---------------------------------------------------------------------------
 
-def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: str, mode: int) -> list:
+def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: str,
+                   mode: int, skip_initial_boot: bool = False) -> list:
     """Executes the SV signals + SVOS boot + tests loop with retry. Returns all_results."""
     all_results  = []
     retry_needed = []
+
+    skip_boot_once = skip_initial_boot
 
     for i, item in enumerate(qdf_list):
         qdf  = item['qdf']
@@ -1899,7 +1959,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
             t0_boot = time.time()
             if needs_svos:
-                boot_svos(s, fused_nudge=(mode == 4))
+                if skip_boot_once:
+                    _status('Skip boot enabled: assuming current session is already in SVOS.', 'info')
+                    skip_boot_once = False
+                else:
+                    boot_svos(s, fused_nudge=(mode == 4))
                 if has_svos_tests:
                     setup_fco_dir(s, qdf, week)
             else:
@@ -2193,7 +2257,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
 def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
                    content=None, mode=2, soc='x4', kwargs=None, vid: str = '',
-                   ult_vid: str = '') -> tuple:
+                   ult_vid: str = '', skip_boot: bool = False) -> tuple:
     """
     Runs tests on a fused unit (Modes 2 & 3, Phase A).
     No signal coordination with SV — the unit is already fused.
@@ -2207,7 +2271,10 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     has_svos_tests = _has_svos_content(content)
 
     if needs_svos:
-        boot_svos(s, fused_nudge=(mode in (2, 3)))
+        if skip_boot:
+            _status('Skip boot enabled: assuming current session is already in SVOS.', 'info')
+        else:
+            boot_svos(s, fused_nudge=(mode in (2, 3)))
         if has_svos_tests:
             setup_fco_dir(s, qdf, week)
     else:
@@ -2903,8 +2970,11 @@ def main():
                 _status('Mode 4: Fused unit — ignoring the current boot.', 'info')
                 _status('        Waiting for SV to start the overwrite...', 'info')
 
+            skip_boot_fco = _ask_skip_boot_if_in_svos()
+
             summary_ult0 = ult0
-            all_results  = _run_main_loop(s, qdf_list, week, ult0, ifwi, mode)
+            all_results  = _run_main_loop(s, qdf_list, week, ult0, ifwi, mode,
+                                          skip_initial_boot=skip_boot_fco)
 
         elif mode == 2:
             if use_last:
@@ -2947,6 +3017,7 @@ def main():
                 json.dump([{'qdf': qdf, 'ult0': ult0, 'soc': soc, 'content': fused_content}], f, indent=2)
 
             s = _open_serial(com_port)
+            skip_boot_fused = _ask_skip_boot_if_in_svos()
 
             print(f'\n{"="*60}')
             _status(f'Mode 2 — Testing fused QDF: {qdf}', 'step')
@@ -2970,7 +3041,8 @@ def main():
             log_path, overall, result_content = run_fused_test(s, qdf, ult0, week, ifwi,
                                                                content=fused_content, mode=mode,
                                                                vid=fused_vid,
-                                                               ult_vid=fused_ult_vid)
+                                                               ult_vid=fused_ult_vid,
+                                                               skip_boot=skip_boot_fused)
             summary_ult0 = ult0
             summary_vid = fused_vid
             summary_ult_vid = fused_ult_vid
@@ -3036,6 +3108,7 @@ def main():
                          f'Fused QDF: {qdf_fused} | QDFs overwrite: {[i["qdf"] for i in qdf_list]}')
 
             s = _open_serial(com_port)
+            skip_boot_phase_a = _ask_skip_boot_if_in_svos()
 
             # PHASE A: test the fused QDF
             print(f'\n{"="*60}')
@@ -3044,7 +3117,8 @@ def main():
 
             log_path_f, overall_f, result_content_f = run_fused_test(s, qdf_fused, ult0_f, week, ifwi,
                                                                       content=fused_content_m3, mode=mode,
-                                                                      soc=soc_f, kwargs=None)
+                                                                      soc=soc_f, kwargs=None,
+                                                                      skip_boot=skip_boot_phase_a)
             all_results.append({'qdf': qdf_fused, 'overall': overall_f, 'log': str(log_path_f),
                                  'result_content': result_content_f})
 
