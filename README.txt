@@ -188,8 +188,11 @@ CentOS power cycle automatically. It does not run the overwrite.
                                     → Memicals         (memic.py -M 15)
                                     → MLC              (mlc --loaded_latency -t60)
                                     → Solar            (/usr/bin/solar/solar.sh)
-                                    → Rocket DSA       (killmax→unmountsv→rmmodsvos2
-                                                        →mountsv→rocket --hw dram,dsa)
+                                    → Rocket DSA/VTD   (first tries rocket --hw dram,dsa,vtd
+                                                        without remount sequence;
+                                                        on FAIL/UNKNOWN runs
+                                                        killmax→unmountsv→rmmodsvos2
+                                                        →mountsv→retry rocket)
                                     → parser (grep PASS/FAIL in *.txt → output.log)
                                     → saves QDF log
   detects {QDF}_svos_done.signal ←  writes {QDF}_svos_done.signal
