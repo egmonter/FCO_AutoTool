@@ -1461,10 +1461,10 @@ def _self_update():
     _update_readme()
 
     if 'FCO_AutoTool.py' in changed:
-        print('  [update] FCO_AutoTool.py was updated — restarting in the same console...')
-        # Use in-place exec to preserve the current console instead of spawning
-        # a detached process and exiting immediately.
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        print('  [update] FCO_AutoTool.py was updated.')
+        print('  [update] Continuing in current process to avoid unexpected console close.')
+        print('  [update] New code will be fully active on next launch.')
+        return
 
 
 def _update_readme():
@@ -3384,7 +3384,13 @@ def main():
 
 
 if __name__ == '__main__':
-    _self_update()
+    try:
+        _self_update()
+    except Exception as e:
+        print(f'\n[!!] Self-update warning: {e}')
+        import traceback
+        traceback.print_exc()
+        print('[!!] Continuing without auto-update.')
     try:
         main()
     except Exception as e:
