@@ -1526,6 +1526,17 @@ def _ask_skip_boot_if_in_svos() -> bool:
     return resp in ('s', 'y', 'yes')
 
 
+def _is_svos_prompt_ready(s: SVOSSession, timeout: int = 8) -> bool:
+    """Checks if serial is currently at an active SVOS prompt."""
+    try:
+        s.flush()
+        s.send_enter()
+        s.read_until_any([SVOS_PROMPT], timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def _has_svos_content(content) -> bool:
     """
     Checks if there is any SVOS content to run (not just CentOS boot).
@@ -1554,7 +1565,12 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
         # Reboot/overwrite preparation depends on mode and fused status
         if mode == 2 and centos_only:
             # CentOS-only: no SVOS, no pysv needed — go straight to BIOS/CentOS navigation.
-            _status('CentOS-only: skipping reboot, navigating directly to CentOS...', 'info')
+            _status('CentOS-only: sending reboot and then navigating to CentOS...', 'info')
+            try:
+                s.send('reboot')
+                time.sleep(1)
+            except Exception as e:
+                _status(f'Could not send reboot before CentOS flow: {e}. Continuing...', 'warn')
         elif mode == 2:
             # Mode 2 with SVOS tests: request hardware power cycle from pysv.
             _status('Mode 2: Requesting power cycle from pysv...', 'info')
@@ -1960,7 +1976,12 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             t0_boot = time.time()
             if needs_svos:
                 if skip_boot_once:
-                    _status('Skip boot enabled: assuming current session is already in SVOS.', 'info')
+                    _status('Skip boot enabled: validating current SVOS prompt...', 'info')
+                    if _is_svos_prompt_ready(s):
+                        _status('SVOS prompt detected. Continuing without boot.', 'ok')
+                    else:
+                        _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
+                        boot_svos(s, fused_nudge=(mode == 4))
                     skip_boot_once = False
                 else:
                     boot_svos(s, fused_nudge=(mode == 4))
@@ -2272,7 +2293,12 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
 
     if needs_svos:
         if skip_boot:
-            _status('Skip boot enabled: assuming current session is already in SVOS.', 'info')
+            _status('Skip boot enabled: validating current SVOS prompt...', 'info')
+            if _is_svos_prompt_ready(s):
+                _status('SVOS prompt detected. Continuing without boot.', 'ok')
+            else:
+                _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
+                boot_svos(s, fused_nudge=(mode in (2, 3)))
         else:
             boot_svos(s, fused_nudge=(mode in (2, 3)))
         if has_svos_tests:
