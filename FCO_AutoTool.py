@@ -27,6 +27,7 @@ import serial
 import logging
 import argparse
 import datetime
+import traceback
 import contextlib
 from pathlib import Path
 
@@ -1475,6 +1476,28 @@ def _is_self_update_enabled() -> bool:
     """Returns True only when startup self-update is explicitly enabled."""
     v = os.environ.get(AUTO_UPDATE_ENV_VAR, '').strip().lower()
     return v in ('1', 'true', 'yes', 'on')
+
+
+def _write_bootstrap_crash_log(stage: str, exc: BaseException):
+    """Writes startup diagnostics even when logging is not initialized yet."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        crash_path = LOG_DIR / f'FCO_bootstrap_crash_{ts}.log'
+        with open(crash_path, 'w', encoding='utf-8') as f:
+            f.write('FCO AutoTool Bootstrap Crash Log\n')
+            f.write('================================\n')
+            f.write(f'Timestamp: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
+            f.write(f'Stage: {stage}\n')
+            f.write(f'Python: {sys.executable}\n')
+            f.write(f'CWD: {os.getcwd()}\n')
+            f.write(f'Args: {sys.argv}\n')
+            f.write(f'Exception type: {type(exc).__name__}\n')
+            f.write(f'Exception: {exc}\n\n')
+            traceback.print_exc(file=f)
+        print(f'\n[!!] Crash diagnostics written to: {crash_path}')
+    except Exception:
+        pass
 
 
 def _update_readme():
@@ -3394,21 +3417,31 @@ def main():
 
 
 if __name__ == '__main__':
+    _boot_stage = 'startup'
     if _is_self_update_enabled():
         try:
+            _boot_stage = 'self_update'
             _self_update()
         except Exception as e:
+            _write_bootstrap_crash_log(_boot_stage, e)
             print(f'\n[!!] Self-update warning: {e}')
-            import traceback
             traceback.print_exc()
             print('[!!] Continuing without auto-update.')
     else:
         print(f'  [update] Startup auto-update disabled. Set {AUTO_UPDATE_ENV_VAR}=1 to enable.')
     try:
+        _boot_stage = 'main'
         main()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        if code != 0:
+            _write_bootstrap_crash_log(_boot_stage, e)
+            print(f'\n[!!] Program exited with code {code} during {_boot_stage}.')
+            input('Press ENTER to close...')
+        raise
     except Exception as e:
+        _write_bootstrap_crash_log(_boot_stage, e)
         print(f'\n[!!] ERROR at startup: {e}')
-        import traceback
         traceback.print_exc()
         input('\nPress ENTER to close...')
 
