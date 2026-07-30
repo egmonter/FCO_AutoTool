@@ -104,6 +104,10 @@ HOST_FCO_SCRIPTS_DIR = Path(r'I:\engineering\dev\user_links\egmonter\FCO_Scripts
 # GitHub repo for auto-update
 GITHUB_REPO_URL = 'https://github.com/egmonter/FCO_AutoTool.git'
 
+# Safety gate: startup self-update can be enabled explicitly via env var.
+# Default is disabled to avoid unexpected process termination on some hosts.
+AUTO_UPDATE_ENV_VAR = 'FCO_ENABLE_AUTO_UPDATE'
+
 BAUDRATE      = 115200
 
 # BIOS screen identifier text — any of these is accepted
@@ -1465,6 +1469,12 @@ def _self_update():
         print('  [update] Continuing in current process to avoid unexpected console close.')
         print('  [update] New code will be fully active on next launch.')
         return
+
+
+def _is_self_update_enabled() -> bool:
+    """Returns True only when startup self-update is explicitly enabled."""
+    v = os.environ.get(AUTO_UPDATE_ENV_VAR, '').strip().lower()
+    return v in ('1', 'true', 'yes', 'on')
 
 
 def _update_readme():
@@ -3384,13 +3394,16 @@ def main():
 
 
 if __name__ == '__main__':
-    try:
-        _self_update()
-    except Exception as e:
-        print(f'\n[!!] Self-update warning: {e}')
-        import traceback
-        traceback.print_exc()
-        print('[!!] Continuing without auto-update.')
+    if _is_self_update_enabled():
+        try:
+            _self_update()
+        except Exception as e:
+            print(f'\n[!!] Self-update warning: {e}')
+            import traceback
+            traceback.print_exc()
+            print('[!!] Continuing without auto-update.')
+    else:
+        print(f'  [update] Startup auto-update disabled. Set {AUTO_UPDATE_ENV_VAR}=1 to enable.')
     try:
         main()
     except Exception as e:
