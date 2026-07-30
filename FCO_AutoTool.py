@@ -140,8 +140,8 @@ ROCKET_CMDS = [
     ('rocket --cfgs --atlas "--hw dram,iax" -M 5; rtm -c rtm.cfg -M 5 -f rocket_dram_iax.txt', 'rocket_dram_iax'),
 ]
 
-# Rocket dsa: runs at the end with the special killmax/unmountsv/rmmodsvos2/mountsv sequence
-ROCKET_DSA_CMD = ('rocket --cfgs --atlas "--hw dram,dsa" -M 5; rtm -c rtm.cfg -M 5 -f rocket_dram_dsa.txt', 'rocket_dram_dsa')
+# Rocket dsa/vtd: try direct fast path first; on failure/unknown use contention recovery sequence.
+ROCKET_DSA_CMD = ('rocket --cfgs --atlas "--hw dram,dsa,vtd" -M 5; rtm -c rtm.cfg -M 5 -f rocket_dram_dsa.txt', 'rocket_dram_dsa')
 
 SOLAR_CMD = ('/usr/bin/solar/solar.sh /meshgv '
              '-ratioPUnit0 "" -ratioPUnit1 "" -ratioPUnit2 P0...Pn '
@@ -167,7 +167,7 @@ CONTENT_CMDS = {
     'supercollider':   'sc -M 5',
     'rocket_dram_cpu': 'rocket --cfgs --atlas "--hw dram,cpu" -M 5; rtm -c rtm.cfg -M 5',
     'rocket_dram_iax': 'rocket --cfgs --atlas "--hw dram,iax" -M 5; rtm -c rtm.cfg -M 5',
-    'rocket_dram_dsa': 'rocket --cfgs --atlas "--hw dram,dsa" -M 5; rtm -c rtm.cfg -M 5',
+    'rocket_dram_dsa': 'rocket --cfgs --atlas "--hw dram,dsa,vtd" -M 5; rtm -c rtm.cfg -M 5',
     'memicals':        'memic.py -M 15 memicals:high-mem:proc -X proc:0,1,2,3',
     'mlc':             'mlc --loaded_latency -t60 -Mdatapattern_halfA_half5.txt',
     'solar':           ('/usr/bin/solar/solar.sh /meshgv -ratioPUnit0 "" -ratioPUnit1 "" '
@@ -987,20 +987,34 @@ def run_rocket(s: SVOSSession) -> dict:
 
 def run_rocket_dsa(s: SVOSSession) -> str:
     """
-    Runs rocket dram,dsa with the special preceding sequence:
-    killmax -> unmountsv -> rmmodsvos2 -> mountsv -> rocket dram,dsa
+    Runs rocket dram,dsa,vtd.
+    Fast path: run directly (no remount flow).
+    Fallback: if FAIL/UNKNOWN, run existing contention recovery sequence:
+      killmax -> unmountsv -> rmmodsvos2 -> mountsv -> retry rocket.
     """
-    _status('Preparing Rocket DSA: killmax -> unmountsv -> rmmodsvos2 -> mountsv...', 'step')
-    for cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
-        _status(f'  Running {cmd}...', 'info')
-        s.send(cmd)
-        t = MOUNTSV_TIMEOUT if cmd == 'mountsv' else CMD_TIMEOUT
-        with _guard(f'{cmd}'):
+    cmd_rocket, label = ROCKET_DSA_CMD
+
+    _status('Running Rocket DSA/VTD fast path (no contention recovery sequence)...', 'step')
+    first_result = _run_rocket_cmd(s, cmd_rocket, label)
+
+    if first_result == 'PASS':
+        _pause(f'Rocket DSA/VTD {first_result} — press any key to continue...')
+        return first_result
+
+    _status(
+        f'Rocket DSA/VTD fast path returned {first_result}. Running contention recovery sequence...',
+        'warn',
+    )
+    for prep_cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
+        _status(f'  Running {prep_cmd}...', 'info')
+        s.send(prep_cmd)
+        t = MOUNTSV_TIMEOUT if prep_cmd == 'mountsv' else CMD_TIMEOUT
+        with _guard(f'{prep_cmd}'):
             s.read_until(SVOS_PROMPT, timeout=t)
-    cmd, label = ROCKET_DSA_CMD
-    result = _run_rocket_cmd(s, cmd, label)
-    _pause(f'Rocket DSA {result} — press any key to continue...')
-    return result
+
+    retry_result = _run_rocket_cmd(s, cmd_rocket, label)
+    _pause(f'Rocket DSA/VTD {retry_result} — press any key to continue...')
+    return retry_result
 
 
 def run_memicals(s: SVOSSession) -> str:
