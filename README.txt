@@ -11,7 +11,8 @@ FCO_AutoTool/
 ├── FCO_AutoTool.py        <- run in a separate Python window
 ├── requirements.txt
 ├── signals/               <- SV<->SVOS coordination files (auto-generated)
-└── logs/                  <- per-QDF results + summary (auto-generated)
+└── logs/
+  └── reports/           <- per-QDF results + summary (auto-generated)
 
 
 INSTALLATION (first time only)
@@ -37,8 +38,9 @@ At startup it will show the TOOLS MENU:
   2 - Boot SVOS only
   3 - Update SVOS             (osvsetrelease + osvosupdate)
   4 - Boot CentOS only
+  5 - Setup FCO_Scripts in SVOS (boot + copy from I: drive)
 
-  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)
+  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5)
 
 
 Then, depending on the tool selected:
@@ -54,6 +56,13 @@ TOOL 1 (FCO Automation):
 
   b) COM port       → enter COM9, COM10 or COM11 (or just the number)
   c) Week           → enter the number, e.g.: 17 (or WW17)
+
+  c.1) Initial boot behavior:
+       - The tool now asks:
+           Skip initial boot if already in SVOS shell? (root@sut:/>)
+       - Works for fused and non-fused flows.
+       - If answered "y", the tool validates the SVOS prompt first.
+       - If prompt is NOT detected, it automatically falls back to normal BIOS boot flow.
 
   d) QDFs and parameters:
        - QDFs separated by commas, e.g.: Q9WK, QABC, QXYZ
@@ -98,6 +107,21 @@ TOOL 4 (Boot CentOS only):
   - Boots via BIOS -> UEFI -> BootCentosDMR.efi
   - Validates with login root/root + ifconfig
   - Keeps the tool window open after boot (Ctrl+C to close)
+
+  Note for fused unit + CentOS-only path:
+  - The tool now sends reboot before BIOS navigation to avoid stale-shell transitions.
+
+TOOL 5 (Setup FCO_Scripts in SVOS):
+  - COM port → same as above
+  - Asks if unit is fused
+  - If unit is NOT fused: coordinates with sv_automation for overwrite first
+  - Boots SVOS
+  - Creates ~/FCO_Scripts
+  - Uploads all files from host path:
+      I:\engineering\dev\user_links\egmonter\FCO_Scripts
+  - Applies chmod +x to mlc (if present)
+  - Prints ls -l ~/FCO_Scripts for verification
+  - Keeps the tool window open after setup (Ctrl+C to close)
 
 The script writes qdf_list.json with the entered parameters and then waits
 for the SV signal for each QDF. Do NOT close it.
@@ -145,6 +169,8 @@ CentOS power cycle automatically. It does not run the overwrite.
                                     looks for BIOS screen (OAKSTREAM/EDKII/UEFI)
                                     → navigates Boot Manager Menu
                                     → navigates UEFI Internal Shell
+                                    → if Internal Shell countdown appears
+                                      (startup.nsh / Press ESC), sends ESC automatically
                                     → waits for EFI Shell prompt
                                     → looks for BootSvosDMR.efi on FS0/FS1/FS2
                                     → ENTER (ATTENTION prompt)
@@ -153,6 +179,9 @@ CentOS power cycle automatically. It does not run the overwrite.
                                     → mountsv
                                     → mkdir /root/FCO/FCO_WW{week}/{QDF}
                                     → copies mlc + datapattern from ~/FCO_Scripts
+                                      (fallback: uploads from host path
+                                      I:\engineering\dev\user_links\egmonter\FCO_Scripts
+                                      if missing in SVOS)
                                     → SuperCollider    (sc -M 5)
                                     → Rocket cpu       (rocket --hw dram,cpu + rtm)
                                     → Rocket iax       (rocket --hw dram,iax + rtm)
@@ -212,8 +241,8 @@ RESULTS AND LOGS
 -----------------
   - Console:  real-time status
   - Popup:    alert if a content item fails (does not block execution)
-  - Per QDF:  logs\FCO_WW{week}_{QDF}_{date}.txt
-  - Summary:  logs\FCO_SUMMARY_WW{week}_{date}.txt
+  - Per QDF:  logs\reports\fco_result_{QDF}.txt
+  - Summary:  logs\reports\fco_summary_WW{week}.txt
               (includes IFWI path, ULT, the result of all QDFs,
                and the full log of each one embedded at the end)
 
@@ -240,6 +269,21 @@ RESULTS AND LOGS
   - If BIOS navigation fails, the script retries up to 5 times
     sending ESC before each attempt.
 
+    - Internal Shell countdown handling:
+      After selecting UEFI Internal Shell, if startup.nsh countdown text appears,
+      the tool sends ESC automatically to keep control before auto-jump to FS0.
+
+    - Skip initial boot (fused and non-fused):
+      In FCO flows, you can skip initial boot if you already are at root@sut:/>.
+      The tool validates the prompt first and automatically falls back to boot_svos()
+      if SVOS prompt is not detected.
+
+    - MLC prerequisites auto-copy with fallback:
+      setup_fco_dir first copies mlc and datapattern_halfA_half5.txt from ~/FCO_Scripts.
+      If one is missing there, it uploads the missing file from:
+      I:\engineering\dev\user_links\egmonter\FCO_Scripts
+      If the file is missing in both places, the step fails with a clear message.
+
   - Configurable timeouts at the start of FCO_AutoTool.py:
       BIOS_WAIT_TIMEOUT  = 900s  (15 min)
       BOOT_TIMEOUT       = 600s  (10 min)
@@ -251,6 +295,11 @@ RESULTS AND LOGS
       SOLAR_TIMEOUT      = 1200s (20 min)
 
   - CentOS Boot Check details are documented in Tool 1 content + Tool 4 sections.
+
+  - Tool 5 (Setup FCO_Scripts in SVOS):
+      Use this when you want to pre-seed ~/FCO_Scripts in SVOS from the host
+      I: drive before running content. It uploads all files found in:
+      I:\engineering\dev\user_links\egmonter\FCO_Scripts
 
   - AUTOMATIC CentOS Boot Coordination (All Modes):
       CentOS boot is handled automatically via pysv coordination.

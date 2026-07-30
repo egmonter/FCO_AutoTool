@@ -2597,8 +2597,8 @@ def _show_mode2_centos_pysv_instructions(qdf: str):
 def _ask_tool_menu() -> str:
     """
     Shows the main tools menu before the FCO flow.
-    Returns: 'fco' | 'boot' | 'update' | 'centos_direct'
-    Prefix 't' activates TEST_MODE (e.g. t1, t2, t3, t4).
+    Returns: 'fco' | 'boot' | 'update' | 'centos_direct' | 'sync_fco_scripts'
+    Prefix 't' activates TEST_MODE (e.g. t1, t2, t3, t4, t5).
     """
     global TEST_MODE
     print()
@@ -2610,19 +2610,26 @@ def _ask_tool_menu() -> str:
     print('  2 - Boot SVOS only')
     print('  3 - Update SVOS             (osvsetrelease + osvosupdate)')
     print('  4 - Boot CentOS only')
+    print('  5 - Setup FCO_Scripts in SVOS (boot + copy from I: drive)')
     print()
-    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)')
+    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5)')
     print()
-    _map = {'1': 'fco', '2': 'boot', '3': 'update', '4': 'centos_direct'}
+    _map = {
+        '1': 'fco',
+        '2': 'boot',
+        '3': 'update',
+        '4': 'centos_direct',
+        '5': 'sync_fco_scripts',
+    }
     while True:
-        raw = input('Tool (1-4): ').strip().lower()
+        raw = input('Tool (1-5): ').strip().lower()
         if raw.startswith('t') and raw[1:] in _map:
             TEST_MODE = True
             print('  [TEST MODE activated]')
             return _map[raw[1:]]
         if raw in _map:
             return _map[raw]
-        print('  [!!] Enter 1, 2, 3 or 4.')
+        print('  [!!] Enter 1, 2, 3, 4 or 5.')
 
 
 def _parse_svosinfo(text: str) -> dict:
@@ -2933,6 +2940,88 @@ def run_boot_centos_direct(com_port: str):
         _status(f'Port {com_port} closed.', 'info')
 
 
+def run_setup_fco_scripts(com_port: str):
+    """
+    Tool 5: Boots SVOS, creates ~/FCO_Scripts and uploads all files from
+    host path I:\engineering\dev\user_links\egmonter\FCO_Scripts.
+    """
+    print()
+    print('=' * 60)
+    print('  SETUP FCO_SCRIPTS IN SVOS')
+    print('=' * 60)
+    print()
+
+    if not HOST_FCO_SCRIPTS_DIR.exists():
+        _status(f'Host folder not found: {HOST_FCO_SCRIPTS_DIR}', 'fail')
+        _alert_popup('FCO_Scripts setup FAILED',
+                     f'Host folder not found:\n{HOST_FCO_SCRIPTS_DIR}')
+        return
+
+    host_files = sorted([p for p in HOST_FCO_SCRIPTS_DIR.iterdir() if p.is_file()])
+    if not host_files:
+        _status(f'No files found in host folder: {HOST_FCO_SCRIPTS_DIR}', 'fail')
+        _alert_popup('FCO_Scripts setup FAILED',
+                     f'No files found in:\n{HOST_FCO_SCRIPTS_DIR}')
+        return
+
+    fused = _ask_fused()
+
+    if not fused:
+        qdfs, ult0, soc, kwargs = _ask_qdf_params()
+        if not qdfs:
+            print('[!!] ERROR: no QDF entered.')
+            return
+        if len(qdfs) > 1:
+            print('[!] For Setup FCO_Scripts only the first QDF is used for overwrite.')
+        qdf = qdfs[0]
+        try:
+            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+        except Exception as e:
+            _status(f'Error in overwrite: {e}', 'fail')
+            _alert_popup('Overwrite FAILED', str(e))
+            return
+
+    _status(f'Opening {com_port}...', 'step')
+    s = _open_serial(com_port)
+    try:
+        _pause('Ready to boot SVOS and sync ~/FCO_Scripts. Press any key...')
+        boot_svos(s, do_mountsv=False, fused_nudge=fused)
+
+        _status('Preparing ~/FCO_Scripts on SVOS...', 'step')
+        s.send('mkdir -p ~/FCO_Scripts && cd ~/FCO_Scripts')
+        with _guard('create/enter ~/FCO_Scripts'):
+            s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+
+        _status(f'Uploading {len(host_files)} file(s) from host folder...', 'step')
+        for fp in host_files:
+            _status(f'  Uploading {fp.name}...', 'info')
+            _upload_file_to_svos(s, fp, fp.name)
+
+        _status('Applying executable bit to mlc (if present)...', 'step')
+        s.send('test -f mlc && chmod +x mlc || true')
+        with _guard('chmod +x mlc if present'):
+            s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+
+        _status('Listing ~/FCO_Scripts contents...', 'step')
+        s.send('ls -l ~/FCO_Scripts')
+        with _guard('list ~/FCO_Scripts'):
+            s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+
+        _status('FCO_Scripts setup completed in SVOS.', 'ok')
+        _alert_popup_async('FCO_Scripts setup OK',
+                           f'Copied {len(host_files)} file(s) to ~/FCO_Scripts.')
+        _hold_open_until_interrupt('SVOS FCO_SCRIPTS')
+    except KeyboardInterrupt:
+        _status('Manual stop requested (Ctrl+C). Closing setup tool...', 'info')
+    except Exception as e:
+        _status(f'Error during FCO_Scripts setup: {e}', 'fail')
+        logging.error(f'FCO_Scripts setup failed: {e}', exc_info=True)
+        _alert_popup('FCO_Scripts setup FAILED', str(e))
+    finally:
+        s.close()
+        _status(f'Port {com_port} closed.', 'info')
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2957,7 +3046,7 @@ def main():
     # ---- Main tools menu ----
     tool = _ask_tool_menu()
 
-    if tool in ('boot', 'update', 'centos_direct'):
+    if tool in ('boot', 'update', 'centos_direct', 'sync_fco_scripts'):
         # Tools that only need COM port (no week or FCO mode)
         print()
         com_port = input('COM port (e.g.: COM9 or just 9): ').strip()
@@ -2968,8 +3057,10 @@ def main():
             run_boot_svos_only(com_port)
         elif tool == 'update':
             run_update_svos(com_port)
-        else:  # tool == 'centos_direct'
+        elif tool == 'centos_direct':
             run_boot_centos_direct(com_port)
+        else:  # tool == 'sync_fco_scripts'
+            run_setup_fco_scripts(com_port)
         if tool == 'update':
             input('\nPress ENTER to close...')
         return
