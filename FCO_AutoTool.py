@@ -1461,9 +1461,10 @@ def _self_update():
     _update_readme()
 
     if 'FCO_AutoTool.py' in changed:
-        print('  [update] FCO_AutoTool.py was updated — relaunching the new version...')
-        subprocess.Popen([sys.executable] + sys.argv)
-        sys.exit(0)
+        print('  [update] FCO_AutoTool.py was updated — restarting in the same console...')
+        # Use in-place exec to preserve the current console instead of spawning
+        # a detached process and exiting immediately.
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def _update_readme():
