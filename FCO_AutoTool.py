@@ -21,6 +21,7 @@ import sys
 import re
 import json
 import time
+import base64
 import ctypes
 import serial
 import logging
@@ -98,6 +99,7 @@ LOG_DIR       = BASE_DIR / 'logs'
 REPORTS_DIR   = LOG_DIR / 'reports'
 QDF_LIST_FILE    = BASE_DIR / 'qdf_list.json'
 LAST_CONFIG_FILE = BASE_DIR / 'last_config.json'
+HOST_FCO_SCRIPTS_DIR = Path(r'I:\engineering\dev\user_links\egmonter\FCO_Scripts')
 
 # GitHub repo for auto-update
 GITHUB_REPO_URL = 'https://github.com/egmonter/FCO_AutoTool.git'
@@ -863,13 +865,32 @@ def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
     with _guard(f'crear/entrar a {work_dir}'):
         s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
 
-    # Copy required files for MLC from FCO_Scripts
+    # Copy required files for MLC from SVOS first; fallback to host upload if missing.
     _status('Copying mlc and datapattern from ~/FCO_Scripts ...', 'step')
     for f in ['mlc', 'datapattern_halfA_half5.txt']:
-        s.send(f'cp ~/FCO_Scripts/{f} .')
-        with _guard(f'copy {f} - verify it exists in ~/FCO_Scripts/'):
+        copied = False
+
+        # 1) Try local SVOS source
+        s.send(f'cp ~/FCO_Scripts/{f} . 2>/dev/null || true')
+        with _guard(f'copy {f} from ~/FCO_Scripts'):
             s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
-        _status(f'  {f} copied', 'info')
+
+        if _svos_file_exists(s, f):
+            copied = True
+            _status(f'  {f} copied from ~/FCO_Scripts', 'info')
+
+        # 2) Fallback: upload from Windows host path
+        if not copied:
+            host_file = HOST_FCO_SCRIPTS_DIR / f
+            if host_file.exists():
+                _status(f'  {f} not found in ~/FCO_Scripts. Uploading from host path...', 'warn')
+                _upload_file_to_svos(s, host_file, f)
+                _status(f'  {f} uploaded from host path', 'info')
+            else:
+                raise FCOStepError(
+                    f'Required file "{f}" is missing in SVOS (~/FCO_Scripts) '
+                    f'and host path ({HOST_FCO_SCRIPTS_DIR}).')
+
     s.send('chmod +x mlc')
     with _guard('chmod mlc'):
         s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
@@ -878,6 +899,52 @@ def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
 
     _status(f'Directory ready: {work_dir}', 'ok')
     return work_dir
+
+
+def _svos_file_exists(s: SVOSSession, path: str, timeout: int = 15) -> bool:
+    """Returns True when a file exists in the current SVOS context."""
+    marker_ok = b'__FCO_FILE_OK__'
+    marker_no = b'__FCO_FILE_NO__'
+    s.send(f'test -f "{path}" && echo __FCO_FILE_OK__ || echo __FCO_FILE_NO__')
+    _, buf = s.read_until_any([SVOS_PROMPT], timeout=timeout)
+    if marker_ok in buf:
+        return True
+    if marker_no in buf:
+        return False
+    return False
+
+
+def _upload_file_to_svos(s: SVOSSession, local_path: Path, remote_name: str):
+    """
+    Uploads a local host file into current SVOS directory through serial using
+    base64 encoding, then decodes it on target.
+    """
+    if not local_path.exists():
+        raise FCOStepError(f'Host file not found: {local_path}')
+
+    data = local_path.read_bytes()
+    b64 = base64.b64encode(data).decode('ascii')
+    lines = [b64[i:i + 120] for i in range(0, len(b64), 120)]
+    tmp_b64 = f'{remote_name}.b64'
+
+    # Clean previous artifacts
+    s.send(f'rm -f "{tmp_b64}" "{remote_name}"')
+    s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+
+    # Send heredoc payload (single shell operation, much faster than per-line prompts)
+    _status(f'    Uploading {remote_name} ({len(data)} bytes)...', 'wait')
+    s.ser.write((f"cat > '{tmp_b64}' <<'__FCO_EOF__'\r\n").encode())
+    for line in lines:
+        s.ser.write((line + '\r\n').encode())
+    s.ser.write(b"__FCO_EOF__\r\n")
+    s.read_until(SVOS_PROMPT, timeout=max(CMD_TIMEOUT, 120))
+
+    # Decode and validate
+    s.send(f"base64 -d '{tmp_b64}' > '{remote_name}' && rm -f '{tmp_b64}'")
+    s.read_until(SVOS_PROMPT, timeout=max(CMD_TIMEOUT, 120))
+
+    if not _svos_file_exists(s, remote_name):
+        raise FCOStepError(f'Failed to upload {remote_name} to SVOS.')
 
 
 def run_supercollider(s: SVOSSession) -> str:
