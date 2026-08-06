@@ -138,8 +138,8 @@ ROCKET_CMDS = [
     ('rocket --cfgs --atlas "--hw dram,iax" -M 5; rtm -c rtm.cfg -M 5 -f rocket_dram_iax.txt', 'rocket_dram_iax'),
 ]
 
-# Rocket dsa: runs at the end with the special killmax/unmountsv/rmmodsvos2/mountsv sequence
-ROCKET_DSA_CMD = ('rocket --cfgs --atlas "--hw dram,dsa" -M 5; rtm -c rtm.cfg -M 5 -f rocket_dram_dsa.txt', 'rocket_dram_dsa')
+# Rocket dsa/vtd: try direct fast path first; on failure/unknown use contention recovery sequence.
+ROCKET_DSA_CMD = ('rocket --cfgs --atlas "--hw dram,dsa,vtd" -M 5; rtm -c rtm.cfg -M 5 -f rocket_dram_dsa.txt', 'rocket_dram_dsa')
 
 SOLAR_CMD = ('/usr/bin/solar/solar.sh /meshgv '
              '-ratioPUnit0 "" -ratioPUnit1 "" -ratioPUnit2 P0...Pn '
@@ -165,7 +165,7 @@ CONTENT_CMDS = {
     'supercollider':   'sc -M 5',
     'rocket_dram_cpu': 'rocket --cfgs --atlas "--hw dram,cpu" -M 5; rtm -c rtm.cfg -M 5',
     'rocket_dram_iax': 'rocket --cfgs --atlas "--hw dram,iax" -M 5; rtm -c rtm.cfg -M 5',
-    'rocket_dram_dsa': 'rocket --cfgs --atlas "--hw dram,dsa" -M 5; rtm -c rtm.cfg -M 5',
+    'rocket_dram_dsa': 'rocket --cfgs --atlas "--hw dram,dsa,vtd" -M 5; rtm -c rtm.cfg -M 5',
     'memicals':        'memic.py -M 15 memicals:high-mem:proc -X proc:0,1,2,3',
     'mlc':             'mlc --loaded_latency -t60 -Mdatapattern_halfA_half5.txt',
     'solar':           ('/usr/bin/solar/solar.sh /meshgv -ratioPUnit0 "" -ratioPUnit1 "" '
@@ -910,30 +910,68 @@ def _run_rocket_cmd(s: SVOSSession, cmd: str, label: str) -> str:
 
 
 def run_rocket(s: SVOSSession) -> dict:
-    """Runs rocket cpu and iax (dsa goes at the end with a special sequence)."""
+    """
+    Runs Rocket in this order:
+      1) dram,cpu
+      2) dram,dsa,vtd (fast path only)
+      3) dram,iax
+
+    If dsa,vtd fails/unknown, fallback sequence is executed later by run_rocket_dsa()
+    to preserve the original end-of-flow behavior.
+    """
     results = {}
-    for cmd, label in ROCKET_CMDS:
-        results[label] = _run_rocket_cmd(s, cmd, label)
-        _pause(f'Rocket {label} {results[label]} — press any key to continue...')
+
+    # 1) CPU first
+    cpu_cmd, cpu_label = ROCKET_CMDS[0]
+    results[cpu_label] = _run_rocket_cmd(s, cpu_cmd, cpu_label)
+    _pause(f'Rocket {cpu_label} {results[cpu_label]} — press any key to continue...')
+
+    # 2) DSA/VTD fast path in the middle (no recovery sequence here)
+    dsa_cmd, dsa_label = ROCKET_DSA_CMD
+    results[dsa_label] = _run_rocket_cmd(s, dsa_cmd, dsa_label)
+    _pause(f'Rocket DSA/VTD fast path {results[dsa_label]} — press any key to continue...')
+
+    # 3) IAX last among base Rocket configs
+    iax_cmd, iax_label = ROCKET_CMDS[1]
+    results[iax_label] = _run_rocket_cmd(s, iax_cmd, iax_label)
+    _pause(f'Rocket {iax_label} {results[iax_label]} — press any key to continue...')
+
     return results
 
 
-def run_rocket_dsa(s: SVOSSession) -> str:
+def run_rocket_dsa(s: SVOSSession, first_result: str = None) -> str:
     """
-    Runs rocket dram,dsa with the special preceding sequence:
-    killmax -> unmountsv -> rmmodsvos2 -> mountsv -> rocket dram,dsa
+    Finalizes rocket dram,dsa,vtd result.
+    If first_result is PASS, no action is needed.
+    If first_result is FAIL/UNKNOWN (or not provided), runs contention recovery:
+      killmax -> unmountsv -> rmmodsvos2 -> mountsv -> retry rocket.
     """
-    _status('Preparing Rocket DSA: killmax -> unmountsv -> rmmodsvos2 -> mountsv...', 'step')
-    for cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
-        _status(f'  Running {cmd}...', 'info')
-        s.send(cmd)
-        t = MOUNTSV_TIMEOUT if cmd == 'mountsv' else CMD_TIMEOUT
-        with _guard(f'{cmd}'):
+    cmd_rocket, label = ROCKET_DSA_CMD
+
+    if first_result is None:
+        _status('No previous DSA/VTD result found. Running fast path now...', 'warn')
+        first_result = _run_rocket_cmd(s, cmd_rocket, label)
+
+    if first_result == 'PASS':
+        _status('Rocket DSA/VTD fast path passed. No fallback needed.', 'ok')
+        return first_result
+
+    _status(
+        f'Rocket DSA/VTD fast path returned {first_result}. Running contention recovery sequence at end...',
+        'warn',
+    )
+    for prep_cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
+        _status(f'  Running {prep_cmd}...', 'info')
+        s.send(prep_cmd)
+        t = MOUNTSV_TIMEOUT if prep_cmd == 'mountsv' else CMD_TIMEOUT
+        with _guard(f'{prep_cmd}'):
             s.read_until(SVOS_PROMPT, timeout=t)
-    cmd, label = ROCKET_DSA_CMD
-    result = _run_rocket_cmd(s, cmd, label)
-    _pause(f'Rocket DSA {result} — press any key to continue...')
-    return result
+
+    retry_result = _run_rocket_cmd(s, cmd_rocket, label)
+    retest_result = f'{retry_result} (Retest)'
+    _status(f'Rocket DSA/VTD fallback result: {retest_result}', 'info')
+    _pause(f'Rocket DSA/VTD fallback retry {retest_result} — press any key to continue...')
+    return retest_result
 
 
 def run_memicals(s: SVOSSession) -> str:
@@ -1036,7 +1074,15 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
     """Generates fco_result_{qdf}.txt in logs/reports/ and archives it there."""
     log_dir.mkdir(parents=True, exist_ok=True)
     ts      = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    overall = 'PASS' if all(v == 'PASS' for v in results.values() if v != 'SKIPPED') else 'FAIL'
+
+    def _base_result(v):
+        if not isinstance(v, str):
+            return v
+        return v.replace(' (Retest)', '').strip()
+
+    overall = 'PASS' if all(_base_result(v) == 'PASS'
+                            for v in results.values()
+                            if _base_result(v) != 'SKIPPED') else 'FAIL'
 
     # Column widths for the content table
     NAME_W = 20
@@ -1889,15 +1935,17 @@ def _open_serial(com_port: str) -> 'SVOSSession':
         results['supercollider'] = 'SKIPPED'
 
     if _should_run(content, 'rocket'):
-        rocket_res = _run_safe('Rocket cpu/iax', run_rocket, s, _tkey='rocket_cpu_iax')
+        rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s, _tkey='rocket_cpu_iax')
         if isinstance(rocket_res, dict):
             results.update(rocket_res)
         else:
             for _, label in ROCKET_CMDS:
                 results[label] = 'FAIL'
+            results['rocket_dram_dsa'] = 'FAIL'
     else:
         for _, label in ROCKET_CMDS:
             results[label] = 'SKIPPED'
+        results['rocket_dram_dsa'] = 'SKIPPED'
 
     results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals')
                            if _should_run(content, 'memicals') else 'SKIPPED')
@@ -1907,9 +1955,13 @@ def _open_serial(com_port: str) -> 'SVOSSession':
                            if _should_run(content, 'solar')    else 'SKIPPED')
 
     if _should_run(content, 'rocket'):
-        results['rocket_dram_dsa'] = _run_safe('Rocket DSA', run_rocket_dsa, s, _tkey='rocket_dsa')
-    else:
-        results['rocket_dram_dsa'] = 'SKIPPED'
+        results['rocket_dram_dsa'] = _run_safe(
+            'Rocket DSA fallback',
+            run_rocket_dsa,
+            s,
+            results.get('rocket_dram_dsa', 'FAIL'),
+            _tkey='rocket_dsa'
+        )
 
     try:
         run_parser(s)
@@ -2015,15 +2067,17 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['supercollider'] = 'SKIPPED'
 
             if _should_run(content, 'rocket'):
-                rocket_res = _run_safe('Rocket cpu/iax', run_rocket, s, _tkey='rocket_cpu_iax')
+                rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s, _tkey='rocket_cpu_iax')
                 if isinstance(rocket_res, dict):
                     results.update(rocket_res)
                 else:
                     for _, label in ROCKET_CMDS:
                         results[label] = 'FAIL'
+                    results['rocket_dram_dsa'] = 'FAIL'
             else:
                 for _, label in ROCKET_CMDS:
                     results[label] = 'SKIPPED'
+                results['rocket_dram_dsa'] = 'SKIPPED'
 
             results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals')
                                    if _should_run(content, 'memicals') else 'SKIPPED')
@@ -2042,10 +2096,13 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
             if _should_run(content, 'rocket'):
-                results['rocket_dram_dsa'] = _run_safe('Rocket DSA', run_rocket_dsa, s,
-                                                       _tkey='rocket_dsa')
-            else:
-                results['rocket_dram_dsa'] = 'SKIPPED'
+                results['rocket_dram_dsa'] = _run_safe(
+                    'Rocket DSA fallback',
+                    run_rocket_dsa,
+                    s,
+                    results.get('rocket_dram_dsa', 'FAIL'),
+                    _tkey='rocket_dsa'
+                )
 
             if has_svos_tests:
                 try:
@@ -2191,7 +2248,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     results['supercollider'] = 'SKIPPED'
 
                 if _should_run(content_r, 'rocket'):
-                    rocket_res = _run_safe_r('Rocket cpu/iax', run_rocket, s, _tkey='rocket_cpu_iax')
+                    rocket_res = _run_safe_r('Rocket cpu/dsa-vtd/iax', run_rocket, s, _tkey='rocket_cpu_iax')
                     if isinstance(rocket_res, dict):
                         results.update(rocket_res)
                     else:
@@ -2218,8 +2275,13 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     results['svos_boot'] = 'PASS' if has_svos_tests_r else 'SKIPPED'
 
                 if _should_run(content_r, 'rocket'):
-                    results['rocket_dram_dsa'] = _run_safe_r('Rocket DSA', run_rocket_dsa, s,
-                                                             _tkey='rocket_dsa')
+                    results['rocket_dram_dsa'] = _run_safe_r(
+                        'Rocket DSA fallback',
+                        run_rocket_dsa,
+                        s,
+                        results.get('rocket_dram_dsa', 'FAIL'),
+                        _tkey='rocket_dsa'
+                    )
                 else:
                     results['rocket_dram_dsa'] = 'SKIPPED'
 
@@ -2327,7 +2389,7 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         results['supercollider'] = 'SKIPPED'
 
     if _should_run(content, 'rocket'):
-        rocket_res = _run_safe('Rocket cpu/iax', run_rocket, s, _tkey='rocket_cpu_iax')
+        rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s, _tkey='rocket_cpu_iax')
         if isinstance(rocket_res, dict):
             results.update(rocket_res)
         else:
@@ -2354,8 +2416,13 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
     if _should_run(content, 'rocket'):
-        results['rocket_dram_dsa'] = _run_safe('Rocket DSA', run_rocket_dsa, s,
-                                               _tkey='rocket_dsa')
+        results['rocket_dram_dsa'] = _run_safe(
+            'Rocket DSA fallback',
+            run_rocket_dsa,
+            s,
+            results.get('rocket_dram_dsa', 'FAIL'),
+            _tkey='rocket_dsa'
+        )
     else:
         results['rocket_dram_dsa'] = 'SKIPPED'
 

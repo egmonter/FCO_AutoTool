@@ -155,12 +155,14 @@ CentOS power cycle automatically. It does not run the overwrite.
                                     → copies mlc + datapattern from ~/FCO_Scripts
                                     → SuperCollider    (sc -M 5)
                                     → Rocket cpu       (rocket --hw dram,cpu + rtm)
+                                    → Rocket DSA/VTD   (fast path: rocket --hw dram,dsa,vtd)
                                     → Rocket iax       (rocket --hw dram,iax + rtm)
                                     → Memicals         (memic.py -M 15)
                                     → MLC              (mlc --loaded_latency -t60)
                                     → Solar            (/usr/bin/solar/solar.sh)
-                                    → Rocket DSA       (killmax→unmountsv→rmmodsvos2
-                                                        →mountsv→rocket --hw dram,dsa)
+                                    → Rocket DSA/VTD fallback (only if fast path was FAIL/UNKNOWN):
+                                                        killmax→unmountsv→rmmodsvos2
+                                                        →mountsv→retry rocket)
                                     → parser (grep PASS/FAIL in *.txt → output.log)
                                     → saves QDF log
   detects {QDF}_svos_done.signal ←  writes {QDF}_svos_done.signal
