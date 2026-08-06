@@ -2530,8 +2530,8 @@ def _show_mode2_centos_pysv_instructions(qdf: str):
 def _ask_tool_menu() -> str:
     """
     Shows the main tools menu before the FCO flow.
-    Returns: 'fco' | 'boot' | 'update' | 'centos_direct'
-    Prefix 't' activates TEST_MODE (e.g. t1, t2, t3, t4).
+    Returns: 'fco' | 'boot' | 'update' | 'centos_direct' | 'efi_timing'
+    Prefix 't' activates TEST_MODE (e.g. t1, t2, t3, t4, t5).
     """
     global TEST_MODE
     print()
@@ -2543,19 +2543,114 @@ def _ask_tool_menu() -> str:
     print('  2 - Boot SVOS only')
     print('  3 - Update SVOS             (osvsetrelease + osvosupdate)')
     print('  4 - Boot CentOS only')
+    print('  5 - EFI Timing              (overwrite + time to BIOS/EFI gray screen)')
     print()
-    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)')
+    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5)')
     print()
-    _map = {'1': 'fco', '2': 'boot', '3': 'update', '4': 'centos_direct'}
+    _map = {'1': 'fco', '2': 'boot', '3': 'update', '4': 'centos_direct', '5': 'efi_timing'}
     while True:
-        raw = input('Tool (1-4): ').strip().lower()
+        raw = input('Tool (1-5): ').strip().lower()
         if raw.startswith('t') and raw[1:] in _map:
             TEST_MODE = True
             print('  [TEST MODE activated]')
             return _map[raw[1:]]
         if raw in _map:
             return _map[raw]
-        print('  [!!] Enter 1, 2, 3 or 4.')
+        print('  [!!] Enter 1, 2, 3, 4 or 5.')
+
+
+def run_efi_timing(com_port: str):
+    """
+    Tool 5: Measures timing until BIOS/EFI gray screen is detected.
+    - If unit is not fused: measures overwrite duration first.
+    - Then measures post-overwrite (or post-start for fused) to BIOS/EFI screen.
+    """
+    print()
+    print('=' * 60)
+    print('  EFI TIMING')
+    print('=' * 60)
+    print()
+
+    fused = _ask_fused()
+    qdf = ''
+    ult0 = ''
+    soc = 'x4'
+    kwargs = {}
+    overwrite_secs = None
+
+    if not fused:
+        qdfs, ult0, soc, kwargs = _ask_qdf_params()
+        if not qdfs:
+            print('[!!] ERROR: no QDF entered.')
+            return
+        if len(qdfs) > 1:
+            print('[!] For EFI timing only the first QDF is used for overwrite timing.')
+        qdf = qdfs[0]
+
+        try:
+            t0_ow = time.time()
+            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+            overwrite_secs = time.time() - t0_ow
+            _status(f'Overwrite time ({qdf}): {_fmt_dur(overwrite_secs)}', 'ok')
+        except Exception as e:
+            _status(f'Error in overwrite: {e}', 'fail')
+            _alert_popup('Overwrite FAILED', str(e))
+            return
+
+    _status(f'Opening {com_port}...', 'step')
+    s = _open_serial(com_port)
+    try:
+        _pause('Ready to start EFI timing. Press any key...')
+
+        t0_efi = time.time()
+        _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+        time.sleep(BIOS_REBOOT_WAIT)
+        s.flush()
+
+        _status('Looking for BIOS/EFI gray screen (Boot Manager menu screen)...', 'wait')
+        _status("(Press 's' to skip BIOS wait and mark as timeout)", 'info')
+        _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused)
+
+        efi_secs = time.time() - t0_efi
+        total_secs = (overwrite_secs or 0.0) + efi_secs
+
+        print()
+        print('=' * 60)
+        print('  EFI TIMING RESULT')
+        print('=' * 60)
+        if overwrite_secs is not None:
+            print(f'  Overwrite ({qdf})                 : {_fmt_dur(overwrite_secs)}')
+        else:
+            print('  Overwrite                         : N/A (fused mode)')
+        print(f'  Post-overwrite to BIOS/EFI screen : {_fmt_dur(efi_secs)}')
+        print(f'  Total measured time               : {_fmt_dur(total_secs)}')
+        print('=' * 60)
+
+        # Keep one machine-readable log per run under logs/
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        out = LOG_DIR / f'EFI_TIMING_{ts}.txt'
+        lines = [
+            f'Date/Time: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'COM: {com_port}',
+            f'Fused: {fused}',
+            f'QDF: {qdf or "N/A"}',
+            f'Overwrite_seconds: {overwrite_secs if overwrite_secs is not None else "N/A"}',
+            f'Post_overwrite_to_efi_seconds: {efi_secs}',
+            f'Total_seconds: {total_secs}',
+        ]
+        out.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        _status(f'EFI timing log saved: {out}', 'ok')
+
+    except KeyboardInterrupt:
+        _status('Manual stop requested (Ctrl+C). Closing EFI timing tool...', 'info')
+    except Exception as e:
+        _status(f'EFI timing FAILED: {e}', 'fail')
+        logging.error(f'EFI timing failed: {e}', exc_info=True)
+        _alert_popup('EFI Timing FAILED', str(e))
+    finally:
+        s.close()
+        _status(f'Port {com_port} closed.', 'info')
 
 
 def _parse_svosinfo(text: str) -> dict:
@@ -2890,7 +2985,7 @@ def main():
     # ---- Main tools menu ----
     tool = _ask_tool_menu()
 
-    if tool in ('boot', 'update', 'centos_direct'):
+    if tool in ('boot', 'update', 'centos_direct', 'efi_timing'):
         # Tools that only need COM port (no week or FCO mode)
         print()
         com_port = input('COM port (e.g.: COM9 or just 9): ').strip()
@@ -2901,8 +2996,10 @@ def main():
             run_boot_svos_only(com_port)
         elif tool == 'update':
             run_update_svos(com_port)
-        else:  # tool == 'centos_direct'
+        elif tool == 'centos_direct':
             run_boot_centos_direct(com_port)
+        else:  # tool == 'efi_timing'
+            run_efi_timing(com_port)
         if tool == 'update':
             input('\nPress ENTER to close...')
         return
