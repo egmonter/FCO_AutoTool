@@ -34,10 +34,20 @@ Open a SEPARATE CMD/Python window and run:
 
 At startup it will show the TOOLS MENU:
 
+Before the tools menu, it asks for EXECUTION PROFILE:
+
+  1 - Normal
+  2 - Validation (No Kill Time)
+
+Validation (No Kill Time) disables timeout-based kills for all tools
+(1 to 5). Use it for validation/debug runs where you do not want
+automatic timeout aborts.
+
   1 - FCO Automation          (fuse + test)
   2 - Boot SVOS only
   3 - Update SVOS             (osvsetrelease + osvosupdate)
   4 - Boot CentOS only
+  5 - EFI Timing              (overwrite + time to BIOS/EFI gray screen)
 
   Prefix t for TEST MODE (e.g. t1, t2, t3, t4)
 

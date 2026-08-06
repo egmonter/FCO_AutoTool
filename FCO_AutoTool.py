@@ -135,6 +135,7 @@ SOLAR_TIMEOUT    = 1200  # solar                                   20 min
 OSVOSUPDATE_TIMEOUT = 900   # osvosupdate -v                        15 min
 SVOSINFO_TIMEOUT    = 60    # svosinfo                               1 min
 UPDATE_MOUNTSV_TIMEOUT = 900  # umountsv;mountsv in Update SVOS     15 min
+NO_KILL_TIME = False
 
 
 _TIMEOUT_DEFAULTS = {
@@ -194,6 +195,36 @@ def _apply_timeouts_from_file():
         globals()[key] = val
 
     _status(f'Timeouts loaded from {TIMEOUTS_CONFIG_FILE.name}.', 'info')
+
+
+def _enable_no_kill_time_mode():
+    """Disables timeout-based kills for validation runs."""
+    timeout_keys = [k for k in _TIMEOUT_DEFAULTS.keys() if k.endswith('_TIMEOUT')]
+    for key in timeout_keys:
+        globals()[key] = None
+    _status('Validation mode active: timeout kills disabled (No Kill Time).', 'warn')
+
+
+def _ask_runtime_profile():
+    """Prompts startup execution profile: normal or validation without timeout kills."""
+    global NO_KILL_TIME
+    print()
+    print('=' * 60)
+    print('  EXECUTION PROFILE')
+    print('=' * 60)
+    print('  1 - Normal')
+    print('  2 - Validation (No Kill Time)')
+    print()
+    while True:
+        raw = input('Profile (1-2): ').strip()
+        if raw == '1':
+            NO_KILL_TIME = False
+            return
+        if raw == '2':
+            NO_KILL_TIME = True
+            _enable_no_kill_time_mode()
+            return
+        print('  [!!] Enter 1 or 2.')
 
 # Rockets that run in the normal flow (cpu and iax)
 ROCKET_CMDS = [
@@ -550,32 +581,34 @@ INT_SHELL_COUNTDOWN_HINTS = [
 ]
 
 
-def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int, enable_nudge: bool = False):
+def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int | None, enable_nudge: bool = False):
     """
     Waits for the BIOS screen.
     If enable_nudge=True and no data arrives (static BIOS), sends a refresh key
     every BIOS_NUDGE_INTERVAL seconds to force redraw over serial.
     """
     nudge_key = b'\x1b[B'  # down arrow
-    deadline   = time.time() + timeout
+    deadline = (time.time() + timeout) if timeout is not None else None
 
     while True:
         if _check_skip_key():
             raise BiosTimeoutError("BIOS screen wait skipped by user pressing 's'")
 
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            raise BiosTimeoutError(
-                f'BIOS screen did not appear within {timeout}s ({timeout//60} min)')
-
-        wait = min(BIOS_NUDGE_INTERVAL, remaining)
+        if deadline is None:
+            wait = BIOS_NUDGE_INTERVAL
+        else:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise BiosTimeoutError(
+                    f'BIOS screen did not appear within {timeout}s ({timeout//60} min)')
+            wait = min(BIOS_NUDGE_INTERVAL, remaining)
         try:
             s.read_until_any(BIOS_BANNERS, timeout=wait)
             return  # banner encontrado
         except TimeoutError:
             pass
 
-        if time.time() >= deadline:
+        if deadline is not None and time.time() >= deadline:
             raise BiosTimeoutError(
                 f'BIOS screen did not appear within {timeout}s ({timeout//60} min)')
 
@@ -3099,6 +3132,7 @@ def main():
     setup_logging(LOG_DIR / f'FCO_AutoTool_{ts}.log')
     SIGNAL_DIR.mkdir(parents=True, exist_ok=True)
     _apply_timeouts_from_file()
+    _ask_runtime_profile()
 
     logging.info('=== FCO SVOS Automation ===')
 
