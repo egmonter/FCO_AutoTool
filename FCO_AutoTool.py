@@ -98,6 +98,7 @@ LOG_DIR       = BASE_DIR / 'logs'
 REPORTS_DIR   = LOG_DIR / 'reports'
 QDF_LIST_FILE    = BASE_DIR / 'qdf_list.json'
 LAST_CONFIG_FILE = BASE_DIR / 'last_config.json'
+TIMEOUTS_CONFIG_FILE = BASE_DIR / 'timeouts_config.json'
 
 # GitHub repo for auto-update
 GITHUB_REPO_URL = 'https://github.com/egmonter/FCO_AutoTool.git'
@@ -131,6 +132,68 @@ ROCKET_TIMEOUT   = 1200  # rocket + rtm por config                 20 min
 MEMIC_TIMEOUT    = 2400  # memicals                                40 min
 MLC_TIMEOUT      = 2400  # mlc                                     40 min
 SOLAR_TIMEOUT    = 1200  # solar                                   20 min
+OSVOSUPDATE_TIMEOUT = 900   # osvosupdate -v                        15 min
+SVOSINFO_TIMEOUT    = 60    # svosinfo                               1 min
+UPDATE_MOUNTSV_TIMEOUT = 900  # umountsv;mountsv in Update SVOS     15 min
+
+
+_TIMEOUT_DEFAULTS = {
+    'BOOT_TIMEOUT': BOOT_TIMEOUT,
+    'BIOS_REBOOT_WAIT': BIOS_REBOOT_WAIT,
+    'BIOS_WAIT_TIMEOUT': BIOS_WAIT_TIMEOUT,
+    'BIOS_NUDGE_INTERVAL': BIOS_NUDGE_INTERVAL,
+    'SVOS_TIMEOUT': SVOS_TIMEOUT,
+    'CENTOS_BOOT_TIMEOUT': CENTOS_BOOT_TIMEOUT,
+    'MOUNTSV_TIMEOUT': MOUNTSV_TIMEOUT,
+    'CMD_TIMEOUT': CMD_TIMEOUT,
+    'SC_TIMEOUT': SC_TIMEOUT,
+    'ROCKET_TIMEOUT': ROCKET_TIMEOUT,
+    'MEMIC_TIMEOUT': MEMIC_TIMEOUT,
+    'MLC_TIMEOUT': MLC_TIMEOUT,
+    'SOLAR_TIMEOUT': SOLAR_TIMEOUT,
+    'OSVOSUPDATE_TIMEOUT': OSVOSUPDATE_TIMEOUT,
+    'SVOSINFO_TIMEOUT': SVOSINFO_TIMEOUT,
+    'UPDATE_MOUNTSV_TIMEOUT': UPDATE_MOUNTSV_TIMEOUT,
+}
+
+
+def _ensure_timeouts_file():
+    if TIMEOUTS_CONFIG_FILE.exists():
+        return
+    payload = {
+        '_comment': 'Edit timeout values in seconds. Positive integers only.',
+        **_TIMEOUT_DEFAULTS,
+    }
+    TIMEOUTS_CONFIG_FILE.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+
+
+def _apply_timeouts_from_file():
+    """Loads timeout values from timeouts_config.json and applies them globally."""
+    global BOOT_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL
+    global SVOS_TIMEOUT, CENTOS_BOOT_TIMEOUT, MOUNTSV_TIMEOUT, CMD_TIMEOUT
+    global SC_TIMEOUT, ROCKET_TIMEOUT, MEMIC_TIMEOUT, MLC_TIMEOUT, SOLAR_TIMEOUT
+    global OSVOSUPDATE_TIMEOUT, SVOSINFO_TIMEOUT, UPDATE_MOUNTSV_TIMEOUT
+
+    _ensure_timeouts_file()
+
+    try:
+        data = json.loads(TIMEOUTS_CONFIG_FILE.read_text(encoding='utf-8'))
+    except Exception as e:
+        _status(f'Could not read {TIMEOUTS_CONFIG_FILE.name}: {e}. Using defaults.', 'warn')
+        return
+
+    for key, default_val in _TIMEOUT_DEFAULTS.items():
+        raw = data.get(key, default_val)
+        try:
+            val = int(raw)
+            if val <= 0:
+                raise ValueError('must be > 0')
+        except Exception:
+            _status(f'Invalid {key}={raw!r} in {TIMEOUTS_CONFIG_FILE.name}. Keeping {default_val}.', 'warn')
+            val = default_val
+        globals()[key] = val
+
+    _status(f'Timeouts loaded from {TIMEOUTS_CONFIG_FILE.name}.', 'info')
 
 # Rockets that run in the normal flow (cpu and iax)
 ROCKET_CMDS = [
@@ -2468,14 +2531,6 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
 
 
 # ---------------------------------------------------------------------------
-# Extra timeouts for SVOS utilities
-# ---------------------------------------------------------------------------
-
-OSVOSUPDATE_TIMEOUT = 900   # osvosupdate -v                        15 min
-SVOSINFO_TIMEOUT    = 60    # svosinfo                               1 min
-
-
-# ---------------------------------------------------------------------------
 # SVOS utilities — fused/overwrite helpers
 # ---------------------------------------------------------------------------
 
@@ -2880,13 +2935,12 @@ def run_update_svos(com_port: str):
         _status(f'Step {step}/{total_steps} — Running: umountsv; mountsv...', 'step')
         s.send('umountsv; mountsv')
         mountsv_ok = False
-        _UPDATE_MOUNTSV_TIMEOUT = 900  # 15 min (FCO usa 30 min)
         try:
-            s.read_until(SVOS_PROMPT, timeout=_UPDATE_MOUNTSV_TIMEOUT)
+            s.read_until(SVOS_PROMPT, timeout=UPDATE_MOUNTSV_TIMEOUT)
             mountsv_ok = True
             _status('mountsv completed.', 'ok')
         except TimeoutError:
-            _status(f'mountsv did not respond within {_UPDATE_MOUNTSV_TIMEOUT//60} min — iniciando recovery...', 'warn')
+            _status(f'mountsv did not respond within {UPDATE_MOUNTSV_TIMEOUT//60} min — iniciando recovery...', 'warn')
             if fused:
                 # Fused unit: we cannot reboot, we need a manual power cycle
                 _alert_popup('mountsv TIMEOUT — Power Cycle required',
@@ -3044,6 +3098,7 @@ def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     setup_logging(LOG_DIR / f'FCO_AutoTool_{ts}.log')
     SIGNAL_DIR.mkdir(parents=True, exist_ok=True)
+    _apply_timeouts_from_file()
 
     logging.info('=== FCO SVOS Automation ===')
 

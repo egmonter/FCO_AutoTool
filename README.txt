@@ -6,6 +6,7 @@ FILES
 -----
 FCO_AutoTool/
 ├── config.json            <- EDIT: fixed wrapper parameters (proj, stepping, etc.)
+├── timeouts_config.json   <- EDIT: timeout values in seconds (BIOS/SVOS/Rocket/etc.)
 ├── qdf_list.json          <- automatically generated when running FCO_AutoTool.py
 ├── sv_automation.py       <- run INSIDE the SV session
 ├── FCO_AutoTool.py        <- run in a separate Python window
@@ -198,6 +199,22 @@ FCO_AutoTool.py queues it for retry. When the main loop finishes:
   }
 
   If config.json does not exist, sv_automation.py uses the values above as defaults.
+
+
+TIMEOUTS (timeouts_config.json)
+-------------------------------
+
+  Edit timeouts_config.json to adjust waits/timeouts without touching code.
+  All values are in seconds and must be positive integers.
+
+  Common keys:
+    - BIOS_WAIT_TIMEOUT
+    - BOOT_TIMEOUT
+    - MOUNTSV_TIMEOUT
+    - ROCKET_TIMEOUT
+    - UPDATE_MOUNTSV_TIMEOUT
+
+  If a key is missing or invalid, FCO_AutoTool.py keeps the built-in default.
 
 
 ==============================================
