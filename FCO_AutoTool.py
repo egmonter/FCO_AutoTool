@@ -799,7 +799,14 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
         selected_by_arrow = _selected_items_by_arrow(raw)
         _status(f'Attempt {attempt+1}/{max_steps} - highlighted: {highlighted} | arrow: {selected_by_arrow}', 'wait')
 
-        initial_match = any(target in h for h in highlighted) or any(target in h for h in selected_by_arrow)
+        # Some BIOS frames render multiple '>' markers (menu bullets), which is ambiguous.
+        arrow_is_reliable = len(selected_by_arrow) == 1
+        if (not arrow_is_reliable) and selected_by_arrow:
+            _status('Arrow parse ambiguous (multiple entries). Ignoring arrow for selection decision.', 'info')
+
+        initial_match = any(target in h for h in highlighted) or (
+            arrow_is_reliable and any(target in h for h in selected_by_arrow)
+        )
         if initial_match:
             _status(f'"{target}" is highlighted -> confirming for {BIOS_ENTER_CONFIRM_DELAY:.1f}s before Enter', 'ok')
             time.sleep(BIOS_ENTER_CONFIRM_DELAY)
@@ -815,13 +822,16 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
                 raw_confirm, _ = s.read_screen(wait=0.2)
                 highlighted_confirm = _highlighted_items(raw_confirm)
                 arrow_confirm = _selected_items_by_arrow(raw_confirm)
+                arrow_confirm_reliable = len(arrow_confirm) == 1
                 confirm_seen.extend(highlighted_confirm)
                 confirm_arrow_seen.extend(arrow_confirm)
                 if highlighted_confirm:
                     saw_any_highlight = True
-                if arrow_confirm:
+                if arrow_confirm_reliable and arrow_confirm:
                     saw_any_arrow = True
-                if any(target in h for h in highlighted_confirm) or any(target in h for h in arrow_confirm):
+                if any(target in h for h in highlighted_confirm) or (
+                    arrow_confirm_reliable and any(target in h for h in arrow_confirm)
+                ):
                     seen_target = True
                     break
 
