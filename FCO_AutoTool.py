@@ -768,8 +768,9 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
     """
     Navigates the BIOS menu with down arrows looking for `target` as the HIGHLIGHTED item.
     EDK2 highlights the active item with ANSI color ESC[37mESC[40m (white on black).
-    When found: waits briefly, re-checks that the target is still highlighted,
-    and only then presses Enter.
+    When found: waits briefly, then re-checks highlight in short bursts.
+    If confirmation is inconclusive (common with noisy ANSI redraws),
+    trusts the initial hit and presses Enter.
     Raises FCOStepError if not found within max_steps attempts.
     """
     for attempt in range(max_steps):
@@ -781,12 +782,27 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
             _status(f'"{target}" is highlighted -> confirming for {BIOS_ENTER_CONFIRM_DELAY:.1f}s before Enter', 'ok')
             time.sleep(BIOS_ENTER_CONFIRM_DELAY)
 
-            raw_confirm, _ = s.read_screen(wait=0.3)
-            highlighted_confirm = _highlighted_items(raw_confirm)
-            _status(f'Confirmation highlight: {highlighted_confirm}', 'info')
-            if not any(target in h for h in highlighted_confirm):
+            # Re-check in multiple short snapshots; parser can miss highlights
+            # during transient EDKII redraw frames.
+            seen_target = False
+            saw_any_highlight = False
+            confirm_seen = []
+            for _ in range(3):
+                raw_confirm, _ = s.read_screen(wait=0.2)
+                highlighted_confirm = _highlighted_items(raw_confirm)
+                confirm_seen.extend(highlighted_confirm)
+                if highlighted_confirm:
+                    saw_any_highlight = True
+                if any(target in h for h in highlighted_confirm):
+                    seen_target = True
+                    break
+
+            _status(f'Confirmation highlight: {confirm_seen}', 'info')
+            if saw_any_highlight and not seen_target:
                 _status(f'"{target}" moved before Enter. Continuing navigation...', 'warn')
                 continue
+            if (not saw_any_highlight) and (not seen_target):
+                _status('Confirmation inconclusive (no highlight parsed). Trusting initial hit and pressing Enter...', 'warn')
 
             s.send_enter()
             time.sleep(0.5)
@@ -943,10 +959,13 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                 _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
                 navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
 
-                # Verify that we entered Boot Manager Menu and not another menu (e.g. Boot Maintenance Manager)
+                # Verify that we entered Boot Manager Menu and not another menu.
+                # Use Internal Shell presence as positive signal to avoid false
+                # negatives caused by transient/partial screen redraw text.
                 time.sleep(1.0)
                 raw, screen_text = s.read_screen(wait=1.0)
-                if 'Maintenance' in screen_text and 'Boot Manager Menu' not in screen_text:
+                internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
+                if not internal_shell_visible:
                     _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
                     s.send_escape()
                     time.sleep(1.5)
@@ -1136,7 +1155,8 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
 
             time.sleep(1.0)
             _, screen_text = s.read_screen(wait=1.0)
-            if 'Maintenance' in screen_text and 'Boot Manager Menu' not in screen_text:
+            internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
+            if not internal_shell_visible:
                 _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
                 s.send_escape()
                 time.sleep(1.5)
@@ -2422,7 +2442,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
             _status(f'Waiting for SV to complete the fuse overwrite of {qdf}...', 'wait')
             t0_ow = time.time()
-            wait_for_signal(sv_done)
+            with _monitor_stage(f'{qdf} - Bootscript Excecution (Fuse Overwrite)'):
+                wait_for_signal(sv_done)
             if CRONOS_MODE:
                 _timings.setdefault(qdf, {})['overwrite_wait'] = time.time() - t0_ow
             _status(f'Fuse overwrite of {qdf} completed.', 'ok')
@@ -2442,32 +2463,37 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             )
 
             t0_boot = time.time()
-            if needs_svos:
-                if skip_boot_once:
-                    _status('Skip boot enabled: validating current SVOS prompt...', 'info')
-                    if _is_svos_prompt_ready(s):
-                        _status('SVOS prompt detected. Continuing without boot.', 'ok')
+            with _monitor_stage(f'{qdf} - Boot SVOS and setup'):
+                if needs_svos:
+                    if skip_boot_once:
+                        _status('Skip boot enabled: validating current SVOS prompt...', 'info')
+                        if _is_svos_prompt_ready(s):
+                            _status('SVOS prompt detected. Continuing without boot.', 'ok')
+                        else:
+                            _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
+                            boot_svos(s, fused_nudge=(mode == 4))
+                        skip_boot_once = False
                     else:
-                        _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
                         boot_svos(s, fused_nudge=(mode == 4))
-                    skip_boot_once = False
+                    if has_svos_tests:
+                        setup_fco_dir(s, qdf, week)
                 else:
-                    boot_svos(s, fused_nudge=(mode == 4))
-                if has_svos_tests:
-                    setup_fco_dir(s, qdf, week)
-            else:
-                _status('CentOS-only content: skipping SVOS boot.', 'info')
+                    _status('CentOS-only content: skipping SVOS boot.', 'info')
 
             if CRONOS_MODE:
                 _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot
 
             results = {}
 
-            def _run_safe(name, fn, *args, _tkey=None):
+            def _run_safe(name, fn, *args, _tkey=None, _monitor_label=None):
                 """Runs a test, catches any failure, and reports it as FAIL."""
                 t0 = time.time()
                 try:
-                    result = fn(*args)
+                    if _monitor_label:
+                        with _monitor_stage(_monitor_label):
+                            result = fn(*args)
+                    else:
+                        result = fn(*args)
                 except Exception as e:
                     _status(f'{name} FAILED: {e}', 'fail')
                     logging.error(f'{name} failed for {qdf}: {e}', exc_info=True)
@@ -2478,12 +2504,15 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
             if _should_run(content, 'supercollider'):
                 results['supercollider'] = _run_safe('SuperCollider', run_supercollider, s,
-                                                     _tkey='supercollider')
+                                                     _tkey='supercollider',
+                                                     _monitor_label=f'{qdf} - SuperCollider')
             else:
                 results['supercollider'] = 'SKIPPED'
 
             if _should_run(content, 'rocket'):
-                rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s, _tkey='rocket_cpu_iax')
+                rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s,
+                                       _tkey='rocket_cpu_iax',
+                                       _monitor_label=f'{qdf} - Rocket cpu/dsa-vtd/iax')
                 if isinstance(rocket_res, dict):
                     results.update(rocket_res)
                 else:
@@ -2495,16 +2524,20 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     results[label] = 'SKIPPED'
                 results['rocket_dram_dsa'] = 'SKIPPED'
 
-            results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals')
+            results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals',
+                                             _monitor_label=f'{qdf} - Memicals')
                                    if _should_run(content, 'memicals') else 'SKIPPED')
-            results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc')
+            results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc',
+                                             _monitor_label=f'{qdf} - MLC')
                                    if _should_run(content, 'mlc')      else 'SKIPPED')
-            results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar')
+            results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar',
+                                             _monitor_label=f'{qdf} - Solar')
                                    if _should_run(content, 'solar')    else 'SKIPPED')
 
             if _should_run(content, 'svos_boot'):
                 t0_svos_boot = time.time()
-                results['svos_boot'] = run_svos_boot_check(s)
+                with _monitor_stage(f'{qdf} - SVOS boot check'):
+                    results['svos_boot'] = run_svos_boot_check(s)
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot
             else:
@@ -2517,19 +2550,22 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     run_rocket_dsa,
                     s,
                     results.get('rocket_dram_dsa', 'FAIL'),
-                    _tkey='rocket_dsa'
+                    _tkey='rocket_dsa',
+                    _monitor_label=f'{qdf} - Rocket DSA fallback'
                 )
 
             if has_svos_tests:
                 try:
-                    run_parser(s)
+                    with _monitor_stage(f'{qdf} - Parser'):
+                        run_parser(s)
                 except Exception as e:
                     _status(f'Parser failed: {e}', 'fail')
 
             if _should_run(content, 'centos_boot'):
                 t0_centos = time.time()
-                centos_result = run_centos_boot(s, mode, qdf, ult0, item.get('soc', 'x4'),
-                                                item.get('kwargs'), is_retry=False)
+                with _monitor_stage(f'{qdf} - Boot CentOS'):
+                    centos_result = run_centos_boot(s, mode, qdf, ult0, item.get('soc', 'x4'),
+                                                    item.get('kwargs'), is_retry=False)
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
                 results['centos_boot'] = centos_result
@@ -2625,7 +2661,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             print(f'{"="*60}')
 
             try:
-                wait_for_signal(SIGNAL_DIR / f'{qdf}_retry_sv_done.signal')
+                with _monitor_stage(f'{qdf} - Retry Bootscript Excecution (Fuse Overwrite)'):
+                    wait_for_signal(SIGNAL_DIR / f'{qdf}_retry_sv_done.signal')
                 _status(f'Retry overwrite of {qdf} completed.', 'ok')
 
                 content_r = retry_item.get('content')
@@ -2634,21 +2671,26 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     t in content_r for t in CONTENT_TESTS if t != 'centos_boot'
                 )
                 t0_boot_r = time.time()
-                if needs_svos_r:
-                    boot_svos(s, fused_nudge=(mode == 4))
-                    if has_svos_tests_r:
-                        setup_fco_dir(s, qdf, week)
-                else:
-                    _status('CentOS-only retry: skipping SVOS boot.', 'info')
+                with _monitor_stage(f'{qdf} - Retry Boot SVOS and setup'):
+                    if needs_svos_r:
+                        boot_svos(s, fused_nudge=(mode == 4))
+                        if has_svos_tests_r:
+                            setup_fco_dir(s, qdf, week)
+                    else:
+                        _status('CentOS-only retry: skipping SVOS boot.', 'info')
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot_r
 
                 results = {}
 
-                def _run_safe_r(name, fn, *args, _tkey=None):
+                def _run_safe_r(name, fn, *args, _tkey=None, _monitor_label=None):
                     t0 = time.time()
                     try:
-                        result = fn(*args)
+                        if _monitor_label:
+                            with _monitor_stage(_monitor_label):
+                                result = fn(*args)
+                        else:
+                            result = fn(*args)
                     except Exception as e:
                         _status(f'{name} FAILED: {e}', 'fail')
                         logging.error(f'[RETRY] {name} failed for {qdf}: {e}', exc_info=True)
@@ -2659,12 +2701,15 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
                 if _should_run(content_r, 'supercollider'):
                     results['supercollider'] = _run_safe_r('SuperCollider', run_supercollider, s,
-                                                           _tkey='supercollider')
+                                                           _tkey='supercollider',
+                                                           _monitor_label=f'{qdf} - Retry SuperCollider')
                 else:
                     results['supercollider'] = 'SKIPPED'
 
                 if _should_run(content_r, 'rocket'):
-                    rocket_res = _run_safe_r('Rocket cpu/dsa-vtd/iax', run_rocket, s, _tkey='rocket_cpu_iax')
+                    rocket_res = _run_safe_r('Rocket cpu/dsa-vtd/iax', run_rocket, s,
+                                             _tkey='rocket_cpu_iax',
+                                             _monitor_label=f'{qdf} - Retry Rocket cpu/dsa-vtd/iax')
                     if isinstance(rocket_res, dict):
                         results.update(rocket_res)
                     else:
@@ -2674,16 +2719,20 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     for _, label in ROCKET_CMDS:
                         results[label] = 'SKIPPED'
 
-                results['memicals'] = (_run_safe_r('Memicals', run_memicals, s, _tkey='memicals')
+                results['memicals'] = (_run_safe_r('Memicals', run_memicals, s, _tkey='memicals',
+                                                   _monitor_label=f'{qdf} - Retry Memicals')
                                        if _should_run(content_r, 'memicals') else 'SKIPPED')
-                results['mlc']      = (_run_safe_r('MLC', run_mlc, s, _tkey='mlc')
+                results['mlc']      = (_run_safe_r('MLC', run_mlc, s, _tkey='mlc',
+                                                   _monitor_label=f'{qdf} - Retry MLC')
                                        if _should_run(content_r, 'mlc')      else 'SKIPPED')
-                results['solar']    = (_run_safe_r('Solar', run_solar, s, _tkey='solar')
+                results['solar']    = (_run_safe_r('Solar', run_solar, s, _tkey='solar',
+                                                   _monitor_label=f'{qdf} - Retry Solar')
                                        if _should_run(content_r, 'solar')    else 'SKIPPED')
 
                 if _should_run(content_r, 'svos_boot'):
                     t0_svos_boot_r = time.time()
-                    results['svos_boot'] = run_svos_boot_check(s)
+                    with _monitor_stage(f'{qdf} - Retry SVOS boot check'):
+                        results['svos_boot'] = run_svos_boot_check(s)
                     if CRONOS_MODE:
                         _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot_r
                 else:
@@ -2696,14 +2745,16 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                         run_rocket_dsa,
                         s,
                         results.get('rocket_dram_dsa', 'FAIL'),
-                        _tkey='rocket_dsa'
+                        _tkey='rocket_dsa',
+                        _monitor_label=f'{qdf} - Retry Rocket DSA fallback'
                     )
                 else:
                     results['rocket_dram_dsa'] = 'SKIPPED'
 
                 if has_svos_tests_r:
                     try:
-                        run_parser(s)
+                        with _monitor_stage(f'{qdf} - Retry Parser'):
+                            run_parser(s)
                     except Exception as e:
                         _status(f'Parser failed in retry: {e}', 'fail')
 
@@ -2769,27 +2820,32 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     )
     has_svos_tests = _has_svos_content(content)
 
-    if needs_svos:
-        if skip_boot:
-            _status('Skip boot enabled: validating current SVOS prompt...', 'info')
-            if _is_svos_prompt_ready(s):
-                _status('SVOS prompt detected. Continuing without boot.', 'ok')
+    with _monitor_stage(f'{qdf} - Boot SVOS and setup'):
+        if needs_svos:
+            if skip_boot:
+                _status('Skip boot enabled: validating current SVOS prompt...', 'info')
+                if _is_svos_prompt_ready(s):
+                    _status('SVOS prompt detected. Continuing without boot.', 'ok')
+                else:
+                    _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
+                    boot_svos(s, fused_nudge=(mode in (2, 3)))
             else:
-                _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
                 boot_svos(s, fused_nudge=(mode in (2, 3)))
+            if has_svos_tests:
+                setup_fco_dir(s, qdf, week)
         else:
-            boot_svos(s, fused_nudge=(mode in (2, 3)))
-        if has_svos_tests:
-            setup_fco_dir(s, qdf, week)
-    else:
-        _status('CentOS-only content: skipping SVOS boot.', 'info')
+            _status('CentOS-only content: skipping SVOS boot.', 'info')
 
     results = {}
 
-    def _run_safe(name, fn, *args, _tkey=None):
+    def _run_safe(name, fn, *args, _tkey=None, _monitor_label=None):
         t0 = time.time()
         try:
-            result = fn(*args)
+            if _monitor_label:
+                with _monitor_stage(_monitor_label):
+                    result = fn(*args)
+            else:
+                result = fn(*args)
         except Exception as e:
             _status(f'{name} FAILED: {e}', 'fail')
             logging.error(f'{name} failed for fused QDF {qdf}: {e}', exc_info=True)
@@ -2800,12 +2856,15 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
 
     if _should_run(content, 'supercollider'):
         results['supercollider'] = _run_safe('SuperCollider', run_supercollider, s,
-                                             _tkey='supercollider')
+                                             _tkey='supercollider',
+                                             _monitor_label=f'{qdf} - SuperCollider')
     else:
         results['supercollider'] = 'SKIPPED'
 
     if _should_run(content, 'rocket'):
-        rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s, _tkey='rocket_cpu_iax')
+        rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s,
+                               _tkey='rocket_cpu_iax',
+                               _monitor_label=f'{qdf} - Rocket cpu/dsa-vtd/iax')
         if isinstance(rocket_res, dict):
             results.update(rocket_res)
         else:
@@ -2815,16 +2874,20 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         for _, label in ROCKET_CMDS:
             results[label] = 'SKIPPED'
 
-    results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals')
+    results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals',
+                                     _monitor_label=f'{qdf} - Memicals')
                            if _should_run(content, 'memicals') else 'SKIPPED')
-    results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc')
+    results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc',
+                                     _monitor_label=f'{qdf} - MLC')
                            if _should_run(content, 'mlc')      else 'SKIPPED')
-    results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar')
+    results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar',
+                                     _monitor_label=f'{qdf} - Solar')
                            if _should_run(content, 'solar')    else 'SKIPPED')
 
     if _should_run(content, 'svos_boot'):
         t0_svos_boot = time.time()
-        results['svos_boot'] = run_svos_boot_check(s)
+        with _monitor_stage(f'{qdf} - SVOS boot check'):
+            results['svos_boot'] = run_svos_boot_check(s)
         if CRONOS_MODE:
             _timings.setdefault(qdf, {})['svos_boot'] = time.time() - t0_svos_boot
     else:
@@ -2837,14 +2900,16 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
             run_rocket_dsa,
             s,
             results.get('rocket_dram_dsa', 'FAIL'),
-            _tkey='rocket_dsa'
+            _tkey='rocket_dsa',
+            _monitor_label=f'{qdf} - Rocket DSA fallback'
         )
     else:
         results['rocket_dram_dsa'] = 'SKIPPED'
 
     if has_svos_tests:
         try:
-            run_parser(s)
+            with _monitor_stage(f'{qdf} - Parser'):
+                run_parser(s)
         except Exception as e:
             _status(f'Parser failed: {e}', 'fail')
 
@@ -2857,8 +2922,9 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
             _status(f'Mode 2: signal written for pysv monitor: {svos_done_signal.name}', 'info')
         t0_centos = time.time()
         # centos_only=True means skip pysv entirely and do a soft reboot from SVOS.
-        centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False,
-                                        centos_only=(mode == 2 and not needs_svos))
+        with _monitor_stage(f'{qdf} - Boot CentOS'):
+            centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False,
+                                            centos_only=(mode == 2 and not needs_svos))
         if CRONOS_MODE:
             _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
         results['centos_boot'] = centos_result
@@ -3091,7 +3157,8 @@ def run_efi_timing(com_port: str):
 
         try:
             t0_ow = time.time()
-            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs,
+                                  monitor_label='Bootscript Excecution (Fuse Overwrite)')
             overwrite_secs = time.time() - t0_ow
             _status(f'Overwrite time ({qdf}): {_fmt_dur(overwrite_secs)}', 'ok')
         except Exception as e:
@@ -3122,13 +3189,14 @@ def run_efi_timing(com_port: str):
         _pause('Ready to start EFI timing. Press any key...')
 
         t0_efi = time.time()
-        _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
-        time.sleep(BIOS_REBOOT_WAIT)
-        s.flush()
+        with _monitor_stage('EFI Timing - reboot to BIOS/EFI screen'):
+            _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+            time.sleep(BIOS_REBOOT_WAIT)
+            s.flush()
 
-        _status('Looking for BIOS/EFI gray screen (Boot Manager menu screen)...', 'wait')
-        _status("(Press 's' to skip BIOS wait and mark as timeout)", 'info')
-        _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused)
+            _status('Looking for BIOS/EFI gray screen (Boot Manager menu screen)...', 'wait')
+            _status("(Press 's' to skip BIOS wait and mark as timeout)", 'info')
+            _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused)
 
         efi_secs = time.time() - t0_efi
         total_secs = (overwrite_secs or 0.0) + efi_secs
@@ -3367,7 +3435,8 @@ def run_update_svos(com_port: str):
     # --- Preliminary step: overwrite if not fused ---
     if overwrite_qdf:
         try:
-            _do_sv_overwrite_wait(overwrite_qdf, ult0, soc, kwargs)
+            _do_sv_overwrite_wait(overwrite_qdf, ult0, soc, kwargs,
+                                  monitor_label='Bootscript Excecution (Fuse Overwrite)')
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
@@ -3383,66 +3452,71 @@ def run_update_svos(com_port: str):
         # 1. Boot SVOS
         _pause(f'Step {step}/{total_steps} — Boot SVOS. Press a key...')
         _status(f'Step {step}/{total_steps} — Boot SVOS...', 'step')
-        boot_svos(s, do_mountsv=False, fused_nudge=fused)
+        with _monitor_stage('Update SVOS - Boot SVOS'):
+            boot_svos(s, do_mountsv=False, fused_nudge=fused)
         _status('SVOS ready.', 'ok')
         step += 1
 
         # 2. osvsetrelease
         _pause(f'Step {step}/{total_steps} — osvsetrelease. Press a key...')
         _status(f'Step {step}/{total_steps} — Running: osvsetrelease -r {release} -u -n {patch}', 'step')
-        s.send(f'osvsetrelease -r {release} -u -n {patch}')
-        with _guard(f'osvsetrelease -r {release} -u -n {patch}'):
-            s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+        with _monitor_stage('Update SVOS - osvsetrelease'):
+            s.send(f'osvsetrelease -r {release} -u -n {patch}')
+            with _guard(f'osvsetrelease -r {release} -u -n {patch}'):
+                s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
         _status('osvsetrelease completed.', 'ok')
         step += 1
 
         # 3. osvosupdate -v
         _pause(f'Step {step}/{total_steps} — osvosupdate. Press a key...')
         _status(f'Step {step}/{total_steps} — Running: osvosupdate -v (may take ~10 min)...', 'step')
-        s.send('osvosupdate -v')
-        with _guard('osvosupdate -v'):
-            s.read_until(SVOS_PROMPT, timeout=OSVOSUPDATE_TIMEOUT)
+        with _monitor_stage('Update SVOS - osvosupdate'):
+            s.send('osvosupdate -v')
+            with _guard('osvosupdate -v'):
+                s.read_until(SVOS_PROMPT, timeout=OSVOSUPDATE_TIMEOUT)
         _status('osvosupdate completed.', 'ok')
         step += 1
 
         # 4. umountsv; mountsv — with recovery if it hangs
         _pause(f'Step {step}/{total_steps} — umountsv; mountsv. Press a key...')
         _status(f'Step {step}/{total_steps} — Running: umountsv; mountsv...', 'step')
-        s.send('umountsv; mountsv')
-        mountsv_ok = False
-        try:
-            s.read_until(SVOS_PROMPT, timeout=UPDATE_MOUNTSV_TIMEOUT)
-            mountsv_ok = True
-            _status('mountsv completed.', 'ok')
-        except TimeoutError:
-            _status(f'mountsv did not respond within {UPDATE_MOUNTSV_TIMEOUT//60} min — iniciando recovery...', 'warn')
-            if fused:
-                # Fused unit: we cannot reboot, we need a manual power cycle
-                _alert_popup('mountsv TIMEOUT — Power Cycle required',
-                             'mountsv no respondio.\n'
-                             'Haz un power cycle manual a la unidad\n'
-                             'y presiona OK cuando el sistema haya arrancado de nuevo.')
-                _status('Waiting for SVOS to return after the power cycle...', 'wait')
-                s.flush()
-                # Wait for the SVOS prompt to appear (without rebooting through BIOS)
-                s.read_until(SVOS_PROMPT, timeout=None)
-                _status('SVOS back after the power cycle.', 'ok')
-            else:
-                # Not fused unit: reboot via bootscript
-                _status('Unit not fused — relaunching SVOS boot...', 'step')
-                s.flush()
-                boot_svos(s, do_mountsv=False, fused_nudge=fused)
-                _status('SVOS back after reboot.', 'ok')
-            mountsv_ok = True
+        with _monitor_stage('Update SVOS - umountsv/mountsv'):
+            s.send('umountsv; mountsv')
+            mountsv_ok = False
+            try:
+                s.read_until(SVOS_PROMPT, timeout=UPDATE_MOUNTSV_TIMEOUT)
+                mountsv_ok = True
+                _status('mountsv completed.', 'ok')
+            except TimeoutError:
+                _status(f'mountsv did not respond within {UPDATE_MOUNTSV_TIMEOUT//60} min — iniciando recovery...', 'warn')
+                if fused:
+                    # Fused unit: we cannot reboot, we need a manual power cycle
+                    _alert_popup('mountsv TIMEOUT — Power Cycle required',
+                                 'mountsv no respondio.\n'
+                                 'Haz un power cycle manual a la unidad\n'
+                                 'y presiona OK cuando el sistema haya arrancado de nuevo.')
+                    _status('Waiting for SVOS to return after the power cycle...', 'wait')
+                    s.flush()
+                    # Wait for the SVOS prompt to appear (without rebooting through BIOS)
+                    s.read_until(SVOS_PROMPT, timeout=None)
+                    _status('SVOS back after the power cycle.', 'ok')
+                else:
+                    # Not fused unit: reboot via bootscript
+                    _status('Unit not fused — relaunching SVOS boot...', 'step')
+                    s.flush()
+                    boot_svos(s, do_mountsv=False, fused_nudge=fused)
+                    _status('SVOS back after reboot.', 'ok')
+                mountsv_ok = True
         step += 1
 
         # 5. svosinfo + verification
         _pause(f'Step {step}/{total_steps} — svosinfo. Press a key...')
         _status(f'Step {step}/{total_steps} — Verifying with svosinfo...', 'step')
-        s.flush()
-        s.send('svosinfo')
-        with _guard('svosinfo'):
-            raw_out = s.read_until(SVOS_PROMPT, timeout=SVOSINFO_TIMEOUT)
+        with _monitor_stage('Update SVOS - svosinfo verification'):
+            s.flush()
+            s.send('svosinfo')
+            with _guard('svosinfo'):
+                raw_out = s.read_until(SVOS_PROMPT, timeout=SVOSINFO_TIMEOUT)
         info_text = raw_out.decode('utf-8', errors='replace')
         parsed = _parse_svosinfo(info_text)
 
@@ -3543,7 +3617,8 @@ def run_boot_centos_direct(com_port: str):
                 print('[!] For Boot CentOS only the first QDF is used for wrapper overwrite.')
             qdf = qdfs[0]
         try:
-            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs,
+                                  monitor_label='Bootscript Excecution (Fuse Overwrite)')
             did_wrapper = True
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
@@ -3573,7 +3648,8 @@ def run_boot_centos_direct(com_port: str):
             except Exception as e:
                 _status(f'Could not send reboot: {e}. Continuing with BIOS wait...', 'warn')
 
-        boot_centos(s, fused_nudge=fused)
+        with _monitor_stage('Boot CentOS - BIOS/EFI and login validation'):
+            boot_centos(s, fused_nudge=fused)
         _status('CentOS Boot: PASS', 'ok')
         _alert_popup_async('CentOS Boot OK',
                            'CentOS booteo correctamente (login + ifconfig).')
