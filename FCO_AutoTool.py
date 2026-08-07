@@ -366,6 +366,7 @@ class _PopupRuntimeMonitor:
         self._current_idx = None
         self._ready = threading.Event()
         self._failed = threading.Event()
+        self._pinned = False
         self._thread = threading.Thread(target=self._ui_worker, daemon=True)
         self._thread.start()
 
@@ -380,13 +381,21 @@ class _PopupRuntimeMonitor:
             root = tk.Tk()
             root.title('FCO AutoTool - Runtime Monitor')
             root.geometry('560x320')
-            root.attributes('-topmost', True)
+            self._root = root
+            self._set_topmost(True)
+            root.after(3000, self._release_initial_topmost)
 
             container = ttk.Frame(root, padding=10)
             container.pack(fill='both', expand=True)
 
-            title = ttk.Label(container, text='Live execution monitor (Boot SVOS v1)', font=('Segoe UI', 10, 'bold'))
-            title.pack(anchor='w')
+            header = ttk.Frame(container)
+            header.pack(fill='x')
+
+            title = ttk.Label(header, text='Live execution monitor (Boot SVOS v1)', font=('Segoe UI', 10, 'bold'))
+            title.pack(side='left', anchor='w')
+
+            self._pin_button = ttk.Button(header, text='Pin', width=8, command=self._toggle_pin)
+            self._pin_button.pack(side='right')
 
             self._text = tk.Text(container, height=14, width=78, state='disabled')
             self._text.pack(fill='both', expand=True, pady=(8, 0))
@@ -403,6 +412,27 @@ class _PopupRuntimeMonitor:
         except Exception:
             self._failed.set()
             self._ready.set()
+
+    def _set_topmost(self, enabled: bool):
+        if not hasattr(self, '_root'):
+            return
+        try:
+            self._root.attributes('-topmost', enabled)
+            if enabled:
+                self._root.lift()
+        except Exception:
+            pass
+
+    def _release_initial_topmost(self):
+        if self._pinned:
+            return
+        self._set_topmost(False)
+
+    def _toggle_pin(self):
+        self._pinned = not self._pinned
+        self._set_topmost(self._pinned)
+        if hasattr(self, '_pin_button'):
+            self._pin_button.configure(text='Unpin' if self._pinned else 'Pin')
 
     def _drain_events(self):
         while True:
