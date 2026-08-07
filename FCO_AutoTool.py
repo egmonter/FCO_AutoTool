@@ -856,6 +856,7 @@ BIOS_NAV_RETRIES = 5  # maximum retries with ESC before giving up
 
 # Internal Shell countdown handling (to prevent startup.nsh auto-jump to FS0)
 INT_SHELL_COUNTDOWN_TIMEOUT = 25  # seconds
+INT_SHELL_PRE_ESC_WAIT = 1        # seconds to wait after selecting Internal Shell before ESC
 INT_SHELL_POST_ESC_WAIT = 5       # seconds to stabilize after ESC before parsing Shell prompt
 INT_SHELL_COUNTDOWN_HINTS = [
     b'Press ESC',
@@ -909,8 +910,11 @@ def _break_internal_shell_countdown(s: SVOSSession, timeout: int = INT_SHELL_COU
 
     Returns True if ESC was sent, False otherwise.
     """
-    _status('Watching Internal Shell countdown (ESC before auto FS0)...', 'wait')
-    esc_sent = False
+    _status('Internal Shell settle: waiting before forced ESC...', 'wait')
+    time.sleep(INT_SHELL_PRE_ESC_WAIT)
+    _status('Sending ESC to stop startup.nsh auto-run...', 'step')
+    s.send_escape()
+    esc_sent = True
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -919,10 +923,8 @@ def _break_internal_shell_countdown(s: SVOSSession, timeout: int = INT_SHELL_COU
             s.buf += chunk
             s._print(chunk)
 
-            if (not esc_sent) and any(h in s.buf for h in INT_SHELL_COUNTDOWN_HINTS):
-                _status('Countdown detected. Sending ESC to stop startup.nsh auto-run...', 'step')
-                s.send_escape()
-                esc_sent = True
+            if any(h in s.buf for h in INT_SHELL_COUNTDOWN_HINTS):
+                _status('Countdown text observed after ESC.', 'info')
 
             low = s.buf.lower()
             if b'shell>' in low or b'efi shell' in low or b'fs0:' in low or b'fs1:' in low or b'fs2:' in low:
@@ -930,10 +932,7 @@ def _break_internal_shell_countdown(s: SVOSSession, timeout: int = INT_SHELL_COU
 
         time.sleep(0.05)
 
-    if esc_sent:
-        _status('ESC sent for Internal Shell countdown.', 'ok')
-    else:
-        _status('No countdown text detected; continuing with normal EFI shell wait.', 'info')
+    _status('ESC sent for Internal Shell countdown.', 'ok')
     return esc_sent
 
 
@@ -1028,12 +1027,11 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
 
     with _monitor_stage('Boot SVOS - EFI shell and grub launch'):
         # 4. Break Internal Shell countdown (if present), then wait for prompt
-        esc_sent = _break_internal_shell_countdown(s)
-        if esc_sent:
-            _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
-            time.sleep(INT_SHELL_POST_ESC_WAIT)
-            _status('Sending ENTER after post-ESC settle...', 'step')
-            s.send_enter()
+        _break_internal_shell_countdown(s)
+        _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
+        time.sleep(INT_SHELL_POST_ESC_WAIT)
+        _status('Sending ENTER after post-ESC settle...', 'step')
+        s.send_enter()
         _status('Waiting for EFI Shell...', 'wait')
         with _guard('EFI Shell prompt'):
             matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
@@ -1223,12 +1221,11 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                     f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
                     f'Last error: {e}')
 
-    esc_sent = _break_internal_shell_countdown(s)
-    if esc_sent:
-        _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
-        time.sleep(INT_SHELL_POST_ESC_WAIT)
-        _status('Sending ENTER after post-ESC settle...', 'step')
-        s.send_enter()
+    _break_internal_shell_countdown(s)
+    _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
+    time.sleep(INT_SHELL_POST_ESC_WAIT)
+    _status('Sending ENTER after post-ESC settle...', 'step')
+    s.send_enter()
     _status('Waiting for EFI Shell...', 'wait')
     with _guard('EFI Shell prompt'):
         matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
