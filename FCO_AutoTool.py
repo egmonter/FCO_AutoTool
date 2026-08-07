@@ -100,6 +100,8 @@ LOG_DIR       = BASE_DIR / 'logs'
 REPORTS_DIR   = LOG_DIR / 'reports'
 QDF_LIST_FILE    = BASE_DIR / 'qdf_list.json'
 LAST_CONFIG_FILE = BASE_DIR / 'last_config.json'
+LAST_BOOT_SVOS_CONFIG_FILE = BASE_DIR / 'last_boot_svos_config.json'
+LAST_BOOT_CENTOS_CONFIG_FILE = BASE_DIR / 'last_boot_centos_config.json'
 LAST_UPDATE_CONFIG_FILE = BASE_DIR / 'last_update_config.json'
 LAST_EFI_TIMING_CONFIG_FILE = BASE_DIR / 'last_efi_timing_config.json'
 TIMEOUTS_CONFIG_FILE = BASE_DIR / 'timeouts_config.json'
@@ -3177,16 +3179,38 @@ def run_boot_svos_only(com_port: str):
     print('  BOOT SVOS')
     print('=' * 60)
 
-    fused = _ask_fused()
+    cfg_last = _load_json_file(LAST_BOOT_SVOS_CONFIG_FILE)
+    use_last = False
+    if cfg_last is not None:
+        print('  Last Boot SVOS configuration found:')
+        print(f'    Fused: {cfg_last.get("fused")}')
+        print(f'    QDF: {cfg_last.get("qdf", "N/A")}')
+        print(f'    ULT: {cfg_last.get("ult0", "N/A")}')
+        print(f'    SOC: {cfg_last.get("soc", "x4")}')
+        use_last = input('  Use this configuration? (y/n): ').strip().lower() in ('s', 'y', 'yes')
+
+    if use_last:
+        fused = bool(cfg_last.get('fused', False))
+        qdf = cfg_last.get('qdf', '')
+        ult0 = cfg_last.get('ult0', '')
+        soc = cfg_last.get('soc', 'x4')
+        kwargs = cfg_last.get('kwargs', {})
+    else:
+        fused = _ask_fused()
+        qdf = ''
+        ult0 = ''
+        soc = 'x4'
+        kwargs = {}
 
     if not fused:
-        qdfs, ult0, soc, kwargs = _ask_qdf_params()
-        if not qdfs:
-            print('[!!] ERROR: no QDF entered.')
-            return
-        if len(qdfs) > 1:
-            print('[!] For Boot SVOS only the first QDF is used for the overwrite.')
-        qdf = qdfs[0]
+        if not use_last:
+            qdfs, ult0, soc, kwargs = _ask_qdf_params()
+            if not qdfs:
+                print('[!!] ERROR: no QDF entered.')
+                return
+            if len(qdfs) > 1:
+                print('[!] For Boot SVOS only the first QDF is used for the overwrite.')
+            qdf = qdfs[0]
         try:
             _do_sv_overwrite_wait(qdf, ult0, soc, kwargs,
                                   monitor_label='Boot SVOS - overwrite coordination')
@@ -3195,6 +3219,14 @@ def run_boot_svos_only(com_port: str):
             _alert_popup('Overwrite FAILED', str(e))
             _hold_open_on_error('BOOT SVOS')
             return
+
+    _save_json_file(LAST_BOOT_SVOS_CONFIG_FILE, {
+        'fused': fused,
+        'qdf': qdf,
+        'ult0': ult0,
+        'soc': soc,
+        'kwargs': kwargs,
+    })
 
     _status(f'Abriendo {com_port}...', 'step')
     s = _open_serial(com_port)
@@ -3437,17 +3469,40 @@ def run_boot_centos_direct(com_port: str):
     print('=' * 60)
     print()
 
-    fused = _ask_fused()
+    cfg_last = _load_json_file(LAST_BOOT_CENTOS_CONFIG_FILE)
+    use_last = False
+    if cfg_last is not None:
+        print('  Last Boot CentOS configuration found:')
+        print(f'    Fused: {cfg_last.get("fused")}')
+        print(f'    QDF: {cfg_last.get("qdf", "N/A")}')
+        print(f'    ULT: {cfg_last.get("ult0", "N/A")}')
+        print(f'    SOC: {cfg_last.get("soc", "x4")}')
+        use_last = input('  Use this configuration? (y/n): ').strip().lower() in ('s', 'y', 'yes')
+
+    if use_last:
+        fused = bool(cfg_last.get('fused', False))
+        qdf = cfg_last.get('qdf', '')
+        ult0 = cfg_last.get('ult0', '')
+        soc = cfg_last.get('soc', 'x4')
+        kwargs = cfg_last.get('kwargs', {})
+    else:
+        fused = _ask_fused()
+        qdf = ''
+        ult0 = ''
+        soc = 'x4'
+        kwargs = {}
+
     did_wrapper = False
 
     if not fused:
-        qdfs, ult0, soc, kwargs = _ask_qdf_params()
-        if not qdfs:
-            print('[!!] ERROR: no QDF entered.')
-            return
-        if len(qdfs) > 1:
-            print('[!] For Boot CentOS only the first QDF is used for wrapper overwrite.')
-        qdf = qdfs[0]
+        if not use_last:
+            qdfs, ult0, soc, kwargs = _ask_qdf_params()
+            if not qdfs:
+                print('[!!] ERROR: no QDF entered.')
+                return
+            if len(qdfs) > 1:
+                print('[!] For Boot CentOS only the first QDF is used for wrapper overwrite.')
+            qdf = qdfs[0]
         try:
             _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
             did_wrapper = True
@@ -3456,6 +3511,14 @@ def run_boot_centos_direct(com_port: str):
             _alert_popup('Overwrite FAILED', str(e))
             _hold_open_on_error('BOOT CENTOS')
             return
+
+    _save_json_file(LAST_BOOT_CENTOS_CONFIG_FILE, {
+        'fused': fused,
+        'qdf': qdf,
+        'ult0': ult0,
+        'soc': soc,
+        'kwargs': kwargs,
+    })
 
     _status(f'Opening {com_port}...', 'step')
     s = _open_serial(com_port)
