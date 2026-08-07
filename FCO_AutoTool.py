@@ -118,7 +118,7 @@ BIOS_NAV_MAX   = 20                    # maximum down-arrow presses before error
 
 # EFI Shell prompts (adjust if they differ on your platform)
 EFI_PROMPTS   = [b'Shell>', b'shell>', b'EFI Shell']
-SVOS_PROMPT   = b'root@sut:'  # SVOS shell prompt (without /> due to interleaved color codes)
+SVOS_PROMPT   = b'root@'  # SVOS shell prompt prefix (hostname can vary: sut, dhcp1, etc.)
 CENTOS_LOGIN_PROMPTS = [b'dmr-bkc login:', b' login:']
 CENTOS_SHELL_PROMPTS = [b'# ', b'root@', b'[root@']
 
@@ -965,9 +965,9 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         s.send_enter()
 
     with _monitor_stage('Boot SVOS - login and shell validation'):
-        # 7. Wait for the first root@sut:/> (temporary post-ATTENTION shell)
+        # 7. Wait for the first root@... prompt (temporary post-ATTENTION shell)
         _status('Loading SVOS...', 'wait')
-        with _guard('shell SVOS post-boot (root@sut:/>)'):
+        with _guard('shell SVOS post-boot (root@... prompt)'):
             s.read_until(SVOS_PROMPT, timeout=SVOS_TIMEOUT)
         _status('Temporary shell ready. Running login...', 'step')
         s.send('login')
@@ -983,10 +983,10 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         _status('Entering password...', 'step')
         s.send('svos')
 
-        # 9. Wait for the root@sut:/> prompt (authenticated session)
+        # 9. Wait for the root@... prompt (authenticated session)
         with _guard('successful login - verify user/password (root/svos)'):
             s.read_until(SVOS_PROMPT, timeout=30)
-        _status('Login successful. SVOS shell ready (root@sut:/>).', 'ok')
+        _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
 
     if not do_mountsv:
         return
@@ -1874,7 +1874,7 @@ def _ask_skip_boot_if_in_svos() -> bool:
     active SVOS shell on the serial console.
     """
     print()
-    print('Skip initial boot if already in SVOS shell? (root@sut:/>)')
+    print('Skip initial boot if already in SVOS shell? (root@... prompt)')
     resp = input('Skip boot (y/n): ').strip().lower()
     return resp in ('s', 'y', 'yes')
 
@@ -3089,7 +3089,7 @@ def _parse_svosinfo(text: str) -> dict:
 
 def run_boot_svos_only(com_port: str):
     """
-    Tool 2: Boots SVOS and leaves the session at root@sut:/>.
+    Tool 2: Boots SVOS and leaves the session at root@... prompt.
     If the unit is not fused, it coordinates the overwrite with sv_automation (pysv) first.
     """
     print()
@@ -3119,9 +3119,9 @@ def run_boot_svos_only(com_port: str):
     try:
         _pause('Ready to start SVOS boot. Press a key...')
         boot_svos(s, do_mountsv=False, fused_nudge=fused)
-        _status('SVOS ready — root@sut:/> active.', 'ok')
+        _status('SVOS ready - root@... prompt active.', 'ok')
         _alert_popup_async('Boot SVOS OK',
-                           'SVOS booteo correctamente y quedo activo en root@sut:/>.')
+                   'SVOS booteo correctamente y quedo activo en prompt root@....')
         print()
         print('=' * 60)
         print('  BOOT COMPLETED')
