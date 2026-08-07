@@ -3097,6 +3097,9 @@ def run_boot_svos_only(com_port: str):
     print('  BOOT SVOS')
     print('=' * 60)
 
+    # Start popup monitor immediately for Tool 2 (even before serial boot begins).
+    _get_runtime_monitor()
+
     fused = _ask_fused()
 
     if not fused:
@@ -3108,7 +3111,8 @@ def run_boot_svos_only(com_port: str):
             print('[!] For Boot SVOS only the first QDF is used for the overwrite.')
         qdf = qdfs[0]
         try:
-            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+            with _monitor_stage('Boot SVOS - overwrite coordination'):
+                _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
