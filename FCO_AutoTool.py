@@ -304,6 +304,14 @@ def _fmt_dur(secs: float) -> str:
     return f'{m}m {s:02d}s'
 
 
+def _fmt_hms(secs: float) -> str:
+    """Formats seconds as HH:MM:SS."""
+    secs = int(secs)
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return f'{h:02d}:{m:02d}:{s:02d}'
+
+
 def _status(msg: str, level: str = 'step'):
     """Prints a status message with clear formatting to the console."""
     ts = datetime.datetime.now().strftime('%H:%M:%S')
@@ -2774,11 +2782,11 @@ def run_efi_timing(com_port: str):
         print('  EFI TIMING RESULT')
         print('=' * 60)
         if overwrite_secs is not None:
-            print(f'  Overwrite ({qdf})                 : {_fmt_dur(overwrite_secs)}')
+            print(f'  Overwrite ({qdf})                 : {_fmt_hms(overwrite_secs)}')
         else:
             print('  Overwrite                         : N/A (fused mode)')
-        print(f'  Post-overwrite to BIOS/EFI screen : {_fmt_dur(efi_secs)}')
-        print(f'  Total measured time               : {_fmt_dur(total_secs)}')
+        print(f'  Post-overwrite to BIOS/EFI screen : {_fmt_hms(efi_secs)}')
+        print(f'  Total measured time               : {_fmt_hms(total_secs)}')
         print('=' * 60)
 
         # Keep one machine-readable log per run under logs/
@@ -2790,9 +2798,9 @@ def run_efi_timing(com_port: str):
             f'COM: {com_port}',
             f'Fused: {fused}',
             f'QDF: {qdf or "N/A"}',
-            f'Overwrite_seconds: {overwrite_secs if overwrite_secs is not None else "N/A"}',
-            f'Post_overwrite_to_efi_seconds: {efi_secs}',
-            f'Total_seconds: {total_secs}',
+            f'Overwrite_HHMMSS: {_fmt_hms(overwrite_secs) if overwrite_secs is not None else "N/A"}',
+            f'Post_overwrite_to_efi_HHMMSS: {_fmt_hms(efi_secs)}',
+            f'Total_HHMMSS: {_fmt_hms(total_secs)}',
         ]
         out.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         _status(f'EFI timing log saved: {out}', 'ok')
