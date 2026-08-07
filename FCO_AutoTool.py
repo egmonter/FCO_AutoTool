@@ -856,6 +856,7 @@ BIOS_NAV_RETRIES = 5  # maximum retries with ESC before giving up
 
 # Internal Shell countdown handling (to prevent startup.nsh auto-jump to FS0)
 INT_SHELL_COUNTDOWN_TIMEOUT = 25  # seconds
+INT_SHELL_POST_ESC_WAIT = 5       # seconds to stabilize after ESC before parsing Shell prompt
 INT_SHELL_COUNTDOWN_HINTS = [
     b'Press ESC',
     b'press esc',
@@ -1027,7 +1028,12 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
 
     with _monitor_stage('Boot SVOS - EFI shell and grub launch'):
         # 4. Break Internal Shell countdown (if present), then wait for prompt
-        _break_internal_shell_countdown(s)
+        esc_sent = _break_internal_shell_countdown(s)
+        if esc_sent:
+            _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
+            time.sleep(INT_SHELL_POST_ESC_WAIT)
+            _status('Sending ENTER after post-ESC settle...', 'step')
+            s.send_enter()
         _status('Waiting for EFI Shell...', 'wait')
         with _guard('EFI Shell prompt'):
             matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
@@ -1217,7 +1223,12 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                     f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
                     f'Last error: {e}')
 
-    _break_internal_shell_countdown(s)
+    esc_sent = _break_internal_shell_countdown(s)
+    if esc_sent:
+        _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
+        time.sleep(INT_SHELL_POST_ESC_WAIT)
+        _status('Sending ENTER after post-ESC settle...', 'step')
+        s.send_enter()
     _status('Waiting for EFI Shell...', 'wait')
     with _guard('EFI Shell prompt'):
         matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
