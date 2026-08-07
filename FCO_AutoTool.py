@@ -240,6 +240,9 @@ SOLAR_CMD = ('/usr/bin/solar/solar.sh /meshgv '
              '-ratioPUnit3 "" -ratioPUnit4 "" -ratioPUnit5 P0...Pn '
              '-ratioPUnit2f1 P0...Pn -ratioPUnit5f1 P0...Pn /log .')
 
+SVOS_GRUB_PATH = '\\efi\\debian\\grubx64.efi'
+CENTOS_GRUB_PATH = '\\efi\\centos\\grubx64.efi'
+
 # Canonical content keys (display order for the user)
 CONTENT_TESTS = ('supercollider', 'rocket', 'memicals', 'mlc', 'solar', 'svos_boot', 'centos_boot')
 
@@ -661,11 +664,45 @@ def _break_internal_shell_countdown(s: SVOSSession, timeout: int = INT_SHELL_COU
     return esc_sent
 
 
+def _read_until_any_with_periodic_enter(s: SVOSSession, patterns, timeout=SVOS_TIMEOUT,
+                                        enter_every: int = 5,
+                                        tick_msg: str = 'Waiting... sending ENTER keepalive...'):
+    """Reads until any pattern is found, sending ENTER periodically while waiting."""
+    if enter_every <= 0:
+        enter_every = 5
+
+    enc = [p.encode() if isinstance(p, str) else p for p in patterns]
+    deadline = (time.time() + timeout) if timeout is not None else None
+    next_enter = time.time() + enter_every
+
+    while True:
+        chunk = s.ser.read(512)
+        if chunk:
+            s.buf += chunk
+            s._print(chunk)
+
+        for p in enc:
+            if p in s.buf:
+                out, s.buf = s.buf, b''
+                return p, out
+
+        now = time.time()
+        if deadline is not None and now > deadline:
+            raise TimeoutError(f'Timeout ({timeout}s) waiting for patterns: {patterns}')
+
+        if now >= next_enter:
+            _status(tick_msg, 'info')
+            s.send_enter()
+            next_enter = now + enter_every
+
+        time.sleep(0.05)
+
+
 def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False):
     """
     Secuencia completa de arranque:
       BIOS (OAKSTREAM) -> Boot Manager Menu -> UEFI Internal Shell
-      -> FS0: -> \\efi\\boot\\BootSvosDMR.efi -> ENTER (ATTENTION) -> login
+            -> FS0/FS1/FS2 -> \\efi\\debian\\grubx64.efi -> ENTER (ATTENTION) -> login
       -> mountsv (solo si do_mountsv=True)
     """
     # 1. Wait for the BIOS screen (the system needs time to reboot)
@@ -719,7 +756,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
     _status('EFI Shell ready.', 'ok')
 
-    # 5. Look for BootSVOS.efi on FS0, FS1, FS2
+    # 5. Look for SVOS grub on FS0, FS1, FS2
     booted = False
     for fs in ('FS0', 'FS1', 'FS2'):
         _status(f'Trying {fs}: ...', 'step')
@@ -731,8 +768,8 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             _status(f'{fs}: not available, trying next...', 'info')
             continue
 
-        _status(f'Lanzando \\efi\\boot\\BootSvosDMR.efi desde {fs}: ...', 'step')
-        s.send_slow('\\efi\\boot\\BootSvosDMR.efi', char_delay=0.05)
+        _status(f'Launching {SVOS_GRUB_PATH} from {fs}: ...', 'step')
+        s.send_slow(SVOS_GRUB_PATH, char_delay=0.05)
 
         # If the file does NOT exist: the EFI shell returns the prompt in < 5s
         # If the file DOES exist: there is no response for several seconds while it loads
@@ -740,24 +777,36 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         ATTENTION  = b'Press <ENTER> within 10 seconds to drop to a login shell'
         EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
         try:
-            matched, _ = s.read_until_any([ATTENTION] + EFI_PROMPT, timeout=10)
+            matched, _ = _read_until_any_with_periodic_enter(
+                s,
+                [ATTENTION] + EFI_PROMPT,
+                timeout=10,
+                enter_every=5,
+                tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
+            )
             if matched == ATTENTION:
                 booted = True
                 break
             else:
                 # The shell returned the prompt = file not found
-                _status(f'BootSvosDMR.efi not found on {fs}: (prompt returned quickly), trying next...', 'info')
+                _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
                 continue
         except TimeoutError:
             # No prompt within 10s = the file loaded and is booting, wait without limit
-            _status(f'BootSvosDMR.efi loading on {fs}:, waiting for ATTENTION without limit...', 'wait')
-            s.read_until(ATTENTION.decode(), timeout=None)
+            _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
+            _read_until_any_with_periodic_enter(
+                s,
+                [ATTENTION],
+                timeout=None,
+                enter_every=5,
+                tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
+            )
             booted = True
             break
 
     if not booted:
         raise FCOStepError(
-            'No se encontro \\efi\\boot\\BootSvosDMR.efi en FS0:, FS1: ni FS2:. '
+            f'No se encontro {SVOS_GRUB_PATH} en FS0:, FS1: ni FS2:. '
             'Verifica que el filesystem este disponible.')
 
     _status('ATTENTION message detected. Sending ENTER...', 'step')
@@ -804,7 +853,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
 def boot_centos_direct(s: SVOSSession):
     """
     CentOS direct login (TEST mode).
-    Assumes BootCentosDMR.efi is already executing (BIOS navigation skipped).
+    Assumes CentOS grub is already executing (BIOS navigation skipped).
     Waits for login prompt, enters root/root, runs ifconfig.
     """
     _status('CentOS Direct Login mode (TEST) — waiting for login prompt...', 'wait')
@@ -843,7 +892,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
     """
     CentOS boot sequence:
       BIOS -> Boot Manager Menu -> UEFI Internal Shell
-      -> FS0/FS1/FS2 -> \\efi\\boot\\BootCentosDMR.efi -> login root/root
+            -> FS0/FS1/FS2 -> \\efi\\centos\\grubx64.efi -> login root/root
       -> ifconfig (basic sanity check)
     """
     _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
@@ -905,9 +954,9 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
             _status(f'{fs}: not available, trying next...', 'info')
             continue
 
-        _pause(f'Ready to launch BootCentosDMR.efi from {fs}:. Press any key to continue...')
-        _status(f'Launching \\efi\\boot\\BootCentosDMR.efi from {fs}: ...', 'step')
-        s.send_slow('\\efi\\boot\\BootCentosDMR.efi', char_delay=0.05)
+        _pause(f'Ready to launch {CENTOS_GRUB_PATH} from {fs}:. Press any key to continue...')
+        _status(f'Launching {CENTOS_GRUB_PATH} from {fs}: ...', 'step')
+        s.send_slow(CENTOS_GRUB_PATH, char_delay=0.05)
 
         EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
         try:
@@ -916,10 +965,10 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                 booted = True
                 login_seen = True
                 break
-            _status(f'BootCentosDMR.efi not found on {fs}: (prompt returned quickly), trying next...', 'info')
+            _status(f'{CENTOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
             continue
         except TimeoutError:
-            _status(f'BootCentosDMR.efi loading on {fs}:, waiting for login prompt...', 'wait')
+            _status(f'{CENTOS_GRUB_PATH} loading on {fs}:, waiting for login prompt...', 'wait')
             s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
             booted = True
             login_seen = True
@@ -927,7 +976,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
 
     if not booted:
         raise FCOStepError(
-            'Could not find \\efi\\boot\\BootCentosDMR.efi on FS0:, FS1: or FS2:. '
+            f'Could not find {CENTOS_GRUB_PATH} on FS0:, FS1: or FS2:. '
             'Verify that the filesystem is available.')
 
     if not login_seen:
@@ -1709,7 +1758,7 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
 
     Returns 'PASS' or 'FAIL'.
     """
-    _status(f'Running CentOS boot (reboot + \\efi\\boot\\BootCentosDMR.efi + login)...', 'step')
+    _status(f'Running CentOS boot (reboot + {CENTOS_GRUB_PATH} + login)...', 'step')
     
     try:
         # Reboot/overwrite preparation depends on mode and fused status
@@ -2798,9 +2847,9 @@ def run_efi_timing(com_port: str):
             f'COM: {com_port}',
             f'Fused: {fused}',
             f'QDF: {qdf or "N/A"}',
-            f'Overwrite_HHMMSS: {_fmt_hms(overwrite_secs) if overwrite_secs is not None else "N/A"}',
-            f'Post_overwrite_to_efi_HHMMSS: {_fmt_hms(efi_secs)}',
-            f'Total_HHMMSS: {_fmt_hms(total_secs)}',
+            f'Overwrite: {_fmt_hms(overwrite_secs) if overwrite_secs is not None else "N/A"}',
+            f'Post_overwrite_to_efi: {_fmt_hms(efi_secs)}',
+            f'Total: {_fmt_hms(total_secs)}',
         ]
         out.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         _status(f'EFI timing log saved: {out}', 'ok')

@@ -80,7 +80,7 @@ TOOL 1 (FCO Automation):
            * Memicals
            * MLC
            * Solar
-           * CentOS Boot (optional: reboots system, boots via BootCentosDMR.efi,
+           * CentOS Boot (optional: reboots system, boots via \\EFI\\centos\\grubx64.efi,
                           login root/root, runs ifconfig check)
        - If all SVOS content items are "no", it asks:
            * Run SVOS Boot check? (svosinfo response check)
@@ -106,7 +106,7 @@ TOOL 4 (Boot CentOS only):
   - Asks if unit is fused (same flow as Boot SVOS)
   - If unit is NOT fused: coordinates with sv_automation for overwrite first
   - If unit is fused: continues directly to CentOS boot
-  - Boots via BIOS -> UEFI -> BootCentosDMR.efi
+  - Boots via BIOS -> UEFI -> \\EFI\\centos\\grubx64.efi
   - Validates with login root/root + ifconfig
   - Keeps the tool window open after boot (Ctrl+C to close)
 
@@ -157,7 +157,7 @@ CentOS power cycle automatically. It does not run the overwrite.
                                     → navigates Boot Manager Menu
                                     → navigates UEFI Internal Shell
                                     → waits for EFI Shell prompt
-                                    → looks for BootSvosDMR.efi on FS0/FS1/FS2
+                                    → looks for \\EFI\\debian\\grubx64.efi on FS0/FS1/FS2
                                     → ENTER (ATTENTION prompt)
                                     → waits for root@sut:/>
                                     → login (root / svos)
@@ -294,13 +294,13 @@ RESULTS AND LOGS
         3. pysv waits for {QDF}_centos_power_cycle.signal
         4. pysv performs power OFF → waits 30s → power ON → waits 15s
         5. pysv confirms: {QDF}_centos_power_cycled.signal
-        6. FCO_AutoTool continues CentOS boot via BIOS → UEFI → BootCentosDMR.efi
+        6. FCO_AutoTool continues CentOS boot via BIOS → UEFI → \\EFI\\centos\\grubx64.efi
 
       Modes 1/3/4 (Non-fused units — wrapper execution):
         1. FCO_AutoTool sends signal: {QDF}_centos_wrapper.signal (with QDF params)
         2. pysv (idle loop) detects → executes wrapper (bs_wrap.main with params)
         3. pysv confirms: {QDF}_centos_wrapper_done.signal
-        4. FCO_AutoTool continues CentOS boot via BIOS → UEFI → BootCentosDMR.efi
+        4. FCO_AutoTool continues CentOS boot via BIOS → UEFI → \\EFI\\centos\\grubx64.efi
 
       No manual intervention is needed beyond starting the appropriate pysv
       monitor for the selected mode.

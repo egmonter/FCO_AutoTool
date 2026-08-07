@@ -2,7 +2,7 @@
   "_comment": "Edit timeout values in seconds. Positive integers only.",
   "BOOT_TIMEOUT": 600,
   "BIOS_REBOOT_WAIT": 10,
-  "BIOS_WAIT_TIMEOUT": 900,
+  "BIOS_WAIT_TIMEOUT": 1800,
   "BIOS_NUDGE_INTERVAL": 5,
   "SVOS_TIMEOUT": 600,
   "CENTOS_BOOT_TIMEOUT": 600,
