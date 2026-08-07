@@ -98,6 +98,8 @@ LOG_DIR       = BASE_DIR / 'logs'
 REPORTS_DIR   = LOG_DIR / 'reports'
 QDF_LIST_FILE    = BASE_DIR / 'qdf_list.json'
 LAST_CONFIG_FILE = BASE_DIR / 'last_config.json'
+LAST_UPDATE_CONFIG_FILE = BASE_DIR / 'last_update_config.json'
+LAST_EFI_TIMING_CONFIG_FILE = BASE_DIR / 'last_efi_timing_config.json'
 TIMEOUTS_CONFIG_FILE = BASE_DIR / 'timeouts_config.json'
 
 # GitHub repo for auto-update
@@ -1978,6 +1980,24 @@ def _load_last_config() -> dict:
         return None
 
 
+def _save_json_file(path: Path, data: dict):
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        _status(f'Could not save {path.name}: {e}', 'warn')
+
+
+def _load_json_file(path: Path):
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def _print_last_config(cfg: dict):
     """Displays a readable summary of the last saved configuration."""
     print()
@@ -2783,21 +2803,32 @@ def run_efi_timing(com_port: str):
     print('=' * 60)
     print()
 
-    fused = _ask_fused()
-    qdf = ''
-    ult0 = ''
-    soc = 'x4'
-    kwargs = {}
+    cfg_last = _load_json_file(LAST_EFI_TIMING_CONFIG_FILE)
+    use_last = False
+    if cfg_last is not None:
+        print('  Last EFI Timing configuration found:')
+        print(f'    Fused: {cfg_last.get("fused")}')
+        print(f'    QDF: {cfg_last.get("qdf", "N/A")}')
+        print(f'    ULT: {cfg_last.get("ult0", "N/A")}')
+        print(f'    SOC: {cfg_last.get("soc", "x4")}')
+        use_last = input('  Use this configuration? (y/n): ').strip().lower() in ('s', 'y', 'yes')
+
+    fused = cfg_last.get('fused') if use_last else _ask_fused()
+    qdf = cfg_last.get('qdf', '') if use_last else ''
+    ult0 = cfg_last.get('ult0', '') if use_last else ''
+    soc = cfg_last.get('soc', 'x4') if use_last else 'x4'
+    kwargs = cfg_last.get('kwargs', {}) if use_last else {}
     overwrite_secs = None
 
     if not fused:
-        qdfs, ult0, soc, kwargs = _ask_qdf_params()
-        if not qdfs:
-            print('[!!] ERROR: no QDF entered.')
-            return
-        if len(qdfs) > 1:
-            print('[!] For EFI timing only the first QDF is used for overwrite timing.')
-        qdf = qdfs[0]
+        if not use_last:
+            qdfs, ult0, soc, kwargs = _ask_qdf_params()
+            if not qdfs:
+                print('[!!] ERROR: no QDF entered.')
+                return
+            if len(qdfs) > 1:
+                print('[!] For EFI timing only the first QDF is used for overwrite timing.')
+            qdf = qdfs[0]
 
         try:
             t0_ow = time.time()
@@ -2808,6 +2839,22 @@ def run_efi_timing(com_port: str):
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
             return
+
+        _save_json_file(LAST_EFI_TIMING_CONFIG_FILE, {
+            'fused': False,
+            'qdf': qdf,
+            'ult0': ult0,
+            'soc': soc,
+            'kwargs': kwargs,
+        })
+    else:
+        _save_json_file(LAST_EFI_TIMING_CONFIG_FILE, {
+            'fused': True,
+            'qdf': '',
+            'ult0': '',
+            'soc': 'x4',
+            'kwargs': {},
+        })
 
     _status(f'Opening {com_port}...', 'step')
     s = _open_serial(com_port)
@@ -2949,21 +2996,46 @@ def run_update_svos(com_port: str):
     print('  UPDATE SVOS')
     print('=' * 60)
 
-    fused = _ask_fused()
-    overwrite_qdf = None
+    cfg_last = _load_json_file(LAST_UPDATE_CONFIG_FILE)
+    use_last = False
+    if cfg_last is not None:
+        print('  Last Update SVOS configuration found:')
+        print(f'    Fused: {cfg_last.get("fused")}')
+        print(f'    Overwrite QDF: {cfg_last.get("overwrite_qdf", "N/A")}')
+        print(f'    ULT: {cfg_last.get("ult0", "N/A")}')
+        print(f'    SOC: {cfg_last.get("soc", "x4")}')
+        print(f'    Release: {cfg_last.get("release", "")}')
+        print(f'    Patch: {cfg_last.get("patch", "")}')
+        use_last = input('  Use this configuration? (y/n): ').strip().lower() in ('s', 'y', 'yes')
 
-    if not fused:
-        qdfs, ult0, soc, kwargs = _ask_qdf_params()
-        if not qdfs:
-            print('[!!] ERROR: no QDF entered.')
-            return
-        if len(qdfs) > 1:
-            print('[!] For Update SVOS only the first QDF is used for the overwrite.')
-        overwrite_qdf = qdfs[0]
+    if use_last:
+        fused = bool(cfg_last.get('fused', False))
+        overwrite_qdf = cfg_last.get('overwrite_qdf')
+        ult0 = cfg_last.get('ult0', '')
+        soc = cfg_last.get('soc', 'x4')
+        kwargs = cfg_last.get('kwargs', {})
+        release = cfg_last.get('release', '').strip()
+        patch = cfg_last.get('patch', '').strip()
+    else:
+        fused = _ask_fused()
+        overwrite_qdf = None
+        ult0 = ''
+        soc = 'x4'
+        kwargs = {}
 
-    print()
-    release = input('SVOS release (e.g.: dmr2611-bookworm)       : ').strip()
-    patch   = input('Patch number (e.g.: 024)                     : ').strip()
+        if not fused:
+            qdfs, ult0, soc, kwargs = _ask_qdf_params()
+            if not qdfs:
+                print('[!!] ERROR: no QDF entered.')
+                return
+            if len(qdfs) > 1:
+                print('[!] For Update SVOS only the first QDF is used for the overwrite.')
+            overwrite_qdf = qdfs[0]
+
+        print()
+        release = input('SVOS release (e.g.: dmr2611-bookworm)       : ').strip()
+        patch   = input('Patch number (e.g.: 024)                     : ').strip()
+
     if not release or not patch:
         print('[!!] Release and patch are required.')
         return
@@ -2979,6 +3051,16 @@ def run_update_svos(com_port: str):
     if confirm not in ('s', 'y'):
         print('Cancelled.')
         return
+
+    _save_json_file(LAST_UPDATE_CONFIG_FILE, {
+        'fused': fused,
+        'overwrite_qdf': overwrite_qdf,
+        'ult0': ult0,
+        'soc': soc,
+        'kwargs': kwargs,
+        'release': release,
+        'patch': patch,
+    })
 
     # --- Preliminary step: overwrite if not fused ---
     if overwrite_qdf:
