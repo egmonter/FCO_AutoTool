@@ -3097,9 +3097,6 @@ def run_boot_svos_only(com_port: str):
     print('  BOOT SVOS')
     print('=' * 60)
 
-    # Start popup monitor immediately for Tool 2 (even before serial boot begins).
-    _get_runtime_monitor()
-
     fused = _ask_fused()
 
     if not fused:
