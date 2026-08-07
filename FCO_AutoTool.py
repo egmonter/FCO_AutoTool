@@ -27,6 +27,8 @@ import logging
 import argparse
 import datetime
 import contextlib
+import threading
+import queue as pyqueue
 from pathlib import Path
 
 # Windows keypress detection during timeouts
@@ -332,6 +334,152 @@ TEST_MODE   = False
 # Times each step and shows it in the final logs (always active).
 CRONOS_MODE = True
 _timings: dict = {}  # {qdf: {step: elapsed_seconds}}
+
+
+class _NullRuntimeMonitor:
+    """No-op monitor used when popup UI is unavailable."""
+    def start_stage(self, _name: str):
+        return
+
+    def end_stage(self, _status: str = 'DONE'):
+        return
+
+
+class _PopupRuntimeMonitor:
+    """Non-blocking popup monitor that tracks live stage durations."""
+    def __init__(self):
+        self._events = pyqueue.Queue()
+        self._lock = threading.Lock()
+        self._stages = []
+        self._current_idx = None
+        self._ready = threading.Event()
+        self._failed = threading.Event()
+        self._thread = threading.Thread(target=self._ui_worker, daemon=True)
+        self._thread.start()
+
+        # Give the UI a short startup window; if unavailable, auto-disable.
+        self._ready.wait(timeout=2.0)
+
+    def _ui_worker(self):
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+
+            root = tk.Tk()
+            root.title('FCO AutoTool - Runtime Monitor')
+            root.geometry('560x320')
+            root.attributes('-topmost', True)
+
+            container = ttk.Frame(root, padding=10)
+            container.pack(fill='both', expand=True)
+
+            title = ttk.Label(container, text='Live execution monitor (Boot SVOS v1)', font=('Segoe UI', 10, 'bold'))
+            title.pack(anchor='w')
+
+            self._text = tk.Text(container, height=14, width=78, state='disabled')
+            self._text.pack(fill='both', expand=True, pady=(8, 0))
+
+            self._ready.set()
+
+            def _tick():
+                self._drain_events()
+                self._render()
+                root.after(500, _tick)
+
+            root.after(200, _tick)
+            root.mainloop()
+        except Exception:
+            self._failed.set()
+            self._ready.set()
+
+    def _drain_events(self):
+        while True:
+            try:
+                ev = self._events.get_nowait()
+            except pyqueue.Empty:
+                break
+
+            kind = ev.get('kind')
+            now = time.time()
+            with self._lock:
+                if kind == 'start':
+                    if self._current_idx is not None:
+                        # Defensive close if caller forgot to close previous stage.
+                        cur = self._stages[self._current_idx]
+                        if cur['end'] is None:
+                            cur['end'] = now
+                            cur['status'] = 'DONE'
+                    self._stages.append({'name': ev['name'], 'start': now, 'end': None, 'status': 'RUNNING'})
+                    self._current_idx = len(self._stages) - 1
+                elif kind == 'end' and self._current_idx is not None:
+                    cur = self._stages[self._current_idx]
+                    if cur['end'] is None:
+                        cur['end'] = now
+                    cur['status'] = ev.get('status', 'DONE')
+                    self._current_idx = None
+
+    def _render(self):
+        if not hasattr(self, '_text'):
+            return
+
+        now = time.time()
+        lines = []
+        with self._lock:
+            if not self._stages:
+                lines.append('Waiting for first stage...')
+            else:
+                for idx, stage in enumerate(self._stages, start=1):
+                    end_ts = stage['end'] if stage['end'] is not None else now
+                    elapsed = max(0, int(end_ts - stage['start']))
+                    timer = _fmt_hms(elapsed)
+                    status = stage['status']
+                    lines.append(f'{idx}. {stage["name"]}: {timer} [{status}]')
+
+        self._text.configure(state='normal')
+        self._text.delete('1.0', 'end')
+        self._text.insert('1.0', '\n'.join(lines))
+        self._text.configure(state='disabled')
+
+    def start_stage(self, name: str):
+        if self._failed.is_set() or (not self._ready.is_set()):
+            return
+        self._events.put({'kind': 'start', 'name': name})
+
+    def end_stage(self, status: str = 'DONE'):
+        if self._failed.is_set() or (not self._ready.is_set()):
+            return
+        self._events.put({'kind': 'end', 'status': status})
+
+
+_RUNTIME_MONITOR = None
+
+
+def _get_runtime_monitor():
+    """Returns a lazy singleton runtime monitor (popup if available)."""
+    global _RUNTIME_MONITOR
+    if _RUNTIME_MONITOR is None:
+        mon = _PopupRuntimeMonitor()
+        if mon._failed.is_set():
+            _status('Runtime monitor popup unavailable. Continuing without popup monitor.', 'warn')
+            _RUNTIME_MONITOR = _NullRuntimeMonitor()
+        else:
+            _status('Runtime monitor popup started.', 'info')
+            _RUNTIME_MONITOR = mon
+    return _RUNTIME_MONITOR
+
+
+@contextlib.contextmanager
+def _monitor_stage(stage_name: str):
+    """Wraps a stage and reports live timing to the popup monitor."""
+    mon = _get_runtime_monitor()
+    mon.start_stage(stage_name)
+    try:
+        yield
+    except Exception:
+        mon.end_stage('FAIL')
+        raise
+    else:
+        mon.end_stage('DONE')
 
 
 def _pause(msg: str = 'Press any key to continue...'):
@@ -707,149 +855,153 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             -> FS0/FS1/FS2 -> \\efi\\debian\\grubx64.efi -> ENTER (ATTENTION) -> login
       -> mountsv (solo si do_mountsv=True)
     """
-    # 1. Wait for the BIOS screen (the system needs time to reboot)
-    _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
-    time.sleep(BIOS_REBOOT_WAIT)
-    s.flush()  # flush accumulated buffer during reboot
+    with _monitor_stage('Boot SVOS - BIOS wait and menu navigation'):
+        # 1. Wait for the BIOS screen (the system needs time to reboot)
+        _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+        time.sleep(BIOS_REBOOT_WAIT)
+        s.flush()  # flush accumulated buffer during reboot
 
-    _status('Looking for BIOS screen...', 'wait')
-    _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
-    if fused_nudge:
-        _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
-    _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
-    _status('BIOS detected.', 'ok')
-    time.sleep(1)
+        _status('Looking for BIOS screen...', 'wait')
+        _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
+        if fused_nudge:
+            _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
+        _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
+        _status('BIOS detected.', 'ok')
+        time.sleep(1)
 
-    # 2+3. Navigate Boot Manager Menu -> UEFI Internal Shell with retry via ESC
-    for nav_retry in range(BIOS_NAV_RETRIES):
-        try:
-            _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
-            navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=1.0)
+        # 2+3. Navigate Boot Manager Menu -> UEFI Internal Shell with retry via ESC
+        for nav_retry in range(BIOS_NAV_RETRIES):
+            try:
+                _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
+                navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=1.0)
 
-            # Verify that we entered Boot Manager Menu and not another menu (e.g. Boot Maintenance Manager)
-            time.sleep(1.0)
-            raw, screen_text = s.read_screen(wait=1.0)
-            if 'Maintenance' in screen_text and 'Boot Manager Menu' not in screen_text:
-                _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
-                s.send_escape()
-                time.sleep(1.5)
-                continue  # retry from the top of the loop
-            _status('Inside Boot Manager Menu.', 'ok')
+                # Verify that we entered Boot Manager Menu and not another menu (e.g. Boot Maintenance Manager)
+                time.sleep(1.0)
+                raw, screen_text = s.read_screen(wait=1.0)
+                if 'Maintenance' in screen_text and 'Boot Manager Menu' not in screen_text:
+                    _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
+                    s.send_escape()
+                    time.sleep(1.5)
+                    continue  # retry from the top of the loop
+                _status('Inside Boot Manager Menu.', 'ok')
 
-            _status(f'Looking for UEFI Internal Shell...', 'step')
-            navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=1.0)
-            _status('UEFI Internal Shell selected.', 'ok')
-            break  # success, exit the retry loop
+                _status(f'Looking for UEFI Internal Shell...', 'step')
+                navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=1.0)
+                _status('UEFI Internal Shell selected.', 'ok')
+                break  # success, exit the retry loop
 
-        except FCOStepError as e:
-            if nav_retry < BIOS_NAV_RETRIES - 1:
-                _status(f'Not found ({e}). ESC and retrying...', 'warn')
-                s.send_escape()
-                time.sleep(1.5)
-            else:
-                raise FCOStepError(
-                    f'Could not navigate BIOS after {BIOS_NAV_RETRIES} intentos. '
-                    f'Last error: {e}')
+            except FCOStepError as e:
+                if nav_retry < BIOS_NAV_RETRIES - 1:
+                    _status(f'Not found ({e}). ESC and retrying...', 'warn')
+                    s.send_escape()
+                    time.sleep(1.5)
+                else:
+                    raise FCOStepError(
+                        f'Could not navigate BIOS after {BIOS_NAV_RETRIES} intentos. '
+                        f'Last error: {e}')
 
-    # 4. Break Internal Shell countdown (if present), then wait for prompt
-    _break_internal_shell_countdown(s)
-    _status('Waiting for EFI Shell...', 'wait')
-    with _guard('EFI Shell prompt'):
-        s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
-    _status('EFI Shell ready.', 'ok')
+    with _monitor_stage('Boot SVOS - EFI shell and grub launch'):
+        # 4. Break Internal Shell countdown (if present), then wait for prompt
+        _break_internal_shell_countdown(s)
+        _status('Waiting for EFI Shell...', 'wait')
+        with _guard('EFI Shell prompt'):
+            s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
+        _status('EFI Shell ready.', 'ok')
 
-    # 5. Look for SVOS grub on FS0, FS1, FS2
-    booted = False
-    for fs in ('FS0', 'FS1', 'FS2'):
-        _status(f'Trying {fs}: ...', 'step')
-        s.flush()
-        s.send(f'{fs}:')
-        try:
-            s.read_until(f'{fs}:\\', timeout=15)
-        except TimeoutError:
-            _status(f'{fs}: not available, trying next...', 'info')
-            continue
+        # 5. Look for SVOS grub on FS0, FS1, FS2
+        booted = False
+        for fs in ('FS0', 'FS1', 'FS2'):
+            _status(f'Trying {fs}: ...', 'step')
+            s.flush()
+            s.send(f'{fs}:')
+            try:
+                s.read_until(f'{fs}:\\', timeout=15)
+            except TimeoutError:
+                _status(f'{fs}: not available, trying next...', 'info')
+                continue
 
-        _status(f'Launching {SVOS_GRUB_PATH} from {fs}: ...', 'step')
-        s.send_slow(SVOS_GRUB_PATH, char_delay=0.05)
+            _status(f'Launching {SVOS_GRUB_PATH} from {fs}: ...', 'step')
+            s.send_slow(SVOS_GRUB_PATH, char_delay=0.05)
 
-        # If the file does NOT exist: the EFI shell returns the prompt in < 5s
-        # If the file DOES exist: there is no response for several seconds while it loads
-        # -> Wait 10s for the shell prompt; if it does not return = it is loading
-        ATTENTION  = b'Press <ENTER> within 10 seconds to drop to a login shell'
-        EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
-        try:
-            matched, _ = _read_until_any_with_periodic_enter(
-                s,
-                [ATTENTION] + EFI_PROMPT,
-                timeout=10,
-                enter_every=5,
-                tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
-            )
-            if matched == ATTENTION:
+            # If the file does NOT exist: the EFI shell returns the prompt in < 5s
+            # If the file DOES exist: there is no response for several seconds while it loads
+            # -> Wait 10s for the shell prompt; if it does not return = it is loading
+            ATTENTION  = b'Press <ENTER> within 10 seconds to drop to a login shell'
+            EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
+            try:
+                matched, _ = _read_until_any_with_periodic_enter(
+                    s,
+                    [ATTENTION] + EFI_PROMPT,
+                    timeout=10,
+                    enter_every=5,
+                    tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
+                )
+                if matched == ATTENTION:
+                    booted = True
+                    break
+                else:
+                    # The shell returned the prompt = file not found
+                    _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
+                    continue
+            except TimeoutError:
+                # No prompt within 10s = the file loaded and is booting, wait without limit
+                _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
+                _read_until_any_with_periodic_enter(
+                    s,
+                    [ATTENTION],
+                    timeout=None,
+                    enter_every=5,
+                    tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
+                )
                 booted = True
                 break
-            else:
-                # The shell returned the prompt = file not found
-                _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
-                continue
-        except TimeoutError:
-            # No prompt within 10s = the file loaded and is booting, wait without limit
-            _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
-            _read_until_any_with_periodic_enter(
-                s,
-                [ATTENTION],
-                timeout=None,
-                enter_every=5,
-                tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
-            )
-            booted = True
-            break
 
-    if not booted:
-        raise FCOStepError(
-            f'No se encontro {SVOS_GRUB_PATH} en FS0:, FS1: ni FS2:. '
-            'Verifica que el filesystem este disponible.')
+        if not booted:
+            raise FCOStepError(
+                f'No se encontro {SVOS_GRUB_PATH} en FS0:, FS1: ni FS2:. '
+                'Verifica que el filesystem este disponible.')
 
-    _status('ATTENTION message detected. Sending ENTER...', 'step')
-    s.send_enter()
+        _status('ATTENTION message detected. Sending ENTER...', 'step')
+        s.send_enter()
 
-    # 7. Wait for the first root@sut:/> (temporary post-ATTENTION shell)
-    _status('Loading SVOS...', 'wait')
-    with _guard('shell SVOS post-boot (root@sut:/>)'):
-        s.read_until(SVOS_PROMPT, timeout=SVOS_TIMEOUT)
-    _status('Temporary shell ready. Running login...', 'step')
-    s.send('login')
+    with _monitor_stage('Boot SVOS - login and shell validation'):
+        # 7. Wait for the first root@sut:/> (temporary post-ATTENTION shell)
+        _status('Loading SVOS...', 'wait')
+        with _guard('shell SVOS post-boot (root@sut:/>)'):
+            s.read_until(SVOS_PROMPT, timeout=SVOS_TIMEOUT)
+        _status('Temporary shell ready. Running login...', 'step')
+        s.send('login')
 
-    # 8. Login: esperar "sut login:", enviar usuario y clave
-    with _guard('prompt "sut login:" - verify that SVOS loaded correctly'):
-        s.read_until('sut login:', timeout=30)
-    _status('Entering user: root', 'step')
-    s.send('root')
+        # 8. Login: esperar "sut login:", enviar usuario y clave
+        with _guard('prompt "sut login:" - verify that SVOS loaded correctly'):
+            s.read_until('sut login:', timeout=30)
+        _status('Entering user: root', 'step')
+        s.send('root')
 
-    with _guard('prompt "Password:"'):
-        s.read_until_any(['Password:', 'password:'], timeout=30)
-    _status('Entering password...', 'step')
-    s.send('svos')
+        with _guard('prompt "Password:"'):
+            s.read_until_any(['Password:', 'password:'], timeout=30)
+        _status('Entering password...', 'step')
+        s.send('svos')
 
-    # 9. Wait for the root@sut:/> prompt (authenticated session)
-    with _guard('successful login - verify user/password (root/svos)'):
-        s.read_until(SVOS_PROMPT, timeout=30)
-    _status('Login successful. SVOS shell ready (root@sut:/>).', 'ok')
+        # 9. Wait for the root@sut:/> prompt (authenticated session)
+        with _guard('successful login - verify user/password (root/svos)'):
+            s.read_until(SVOS_PROMPT, timeout=30)
+        _status('Login successful. SVOS shell ready (root@sut:/>).', 'ok')
 
     if not do_mountsv:
         return
 
     _pause('Login OK — validate in Raritan and press any key to run mountsv...')
 
-    # 10. Run mountsv and wait for the prompt to return
-    _status('Running mountsv...', 'step')
-    s.send('mountsv')
-    try:
-        s.read_until(SVOS_PROMPT, timeout=MOUNTSV_TIMEOUT)
-    except TimeoutError:
-        raise MountsvTimeoutError(f'mountsv did not respond within {MOUNTSV_TIMEOUT//60} min')
-    _status('mountsv completed. SVOS mounted successfully.', 'ok')
+    with _monitor_stage('Boot SVOS - mountsv'):
+        # 10. Run mountsv and wait for the prompt to return
+        _status('Running mountsv...', 'step')
+        s.send('mountsv')
+        try:
+            s.read_until(SVOS_PROMPT, timeout=MOUNTSV_TIMEOUT)
+        except TimeoutError:
+            raise MountsvTimeoutError(f'mountsv did not respond within {MOUNTSV_TIMEOUT//60} min')
+        _status('mountsv completed. SVOS mounted successfully.', 'ok')
 
 
 def boot_centos_direct(s: SVOSSession):
