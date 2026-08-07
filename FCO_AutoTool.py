@@ -586,6 +586,7 @@ _HIGHLIGHT_RE = re.compile(
     rb'((?:\x1b\[\d+;\d+H)?[^\x1b\r\n]{1,80})'  # text (with possible cursor position)
 )
 _CURSOR_POS_RE = re.compile(rb'\x1b\[\d+;\d+H')
+_ARROW_ROW_RE = re.compile(rb'\x1b\[(\d+);002H>')
 
 
 def _highlighted_items(raw: bytes) -> list:
@@ -597,6 +598,25 @@ def _highlighted_items(raw: bytes) -> list:
     for m in _HIGHLIGHT_RE.finditer(raw):
         chunk = _CURSOR_POS_RE.sub(b'', m.group(1))
         text = chunk.decode('utf-8', errors='replace').strip()
+        if text:
+            results.append(text)
+    return results
+
+
+def _selected_items_by_arrow(raw: bytes) -> list:
+    """
+    Returns selected item texts using BIOS arrow marker '>' at column 2.
+    This is more reliable than color parsing on some noisy ANSI redraws.
+    """
+    results = []
+    for m in _ARROW_ROW_RE.finditer(raw):
+        row = m.group(1).decode('ascii', errors='ignore')
+        # Item text is rendered at column 4 on the same row.
+        pat = re.compile(rb'\x1b\[' + row.encode() + rb';004H([^\x1b\r\n]{1,80})')
+        m_text = pat.search(raw)
+        if not m_text:
+            continue
+        text = m_text.group(1).decode('utf-8', errors='replace').strip()
         if text:
             results.append(text)
     return results
@@ -776,9 +796,11 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
     for attempt in range(max_steps):
         raw, _ = s.read_screen(wait=0.5)
         highlighted = _highlighted_items(raw)
-        _status(f'Attempt {attempt+1}/{max_steps} - highlighted: {highlighted}', 'wait')
+        selected_by_arrow = _selected_items_by_arrow(raw)
+        _status(f'Attempt {attempt+1}/{max_steps} - highlighted: {highlighted} | arrow: {selected_by_arrow}', 'wait')
 
-        if any(target in h for h in highlighted):
+        initial_match = any(target in h for h in highlighted) or any(target in h for h in selected_by_arrow)
+        if initial_match:
             _status(f'"{target}" is highlighted -> confirming for {BIOS_ENTER_CONFIRM_DELAY:.1f}s before Enter', 'ok')
             time.sleep(BIOS_ENTER_CONFIRM_DELAY)
 
@@ -786,22 +808,28 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
             # during transient EDKII redraw frames.
             seen_target = False
             saw_any_highlight = False
+            saw_any_arrow = False
             confirm_seen = []
+            confirm_arrow_seen = []
             for _ in range(3):
                 raw_confirm, _ = s.read_screen(wait=0.2)
                 highlighted_confirm = _highlighted_items(raw_confirm)
+                arrow_confirm = _selected_items_by_arrow(raw_confirm)
                 confirm_seen.extend(highlighted_confirm)
+                confirm_arrow_seen.extend(arrow_confirm)
                 if highlighted_confirm:
                     saw_any_highlight = True
-                if any(target in h for h in highlighted_confirm):
+                if arrow_confirm:
+                    saw_any_arrow = True
+                if any(target in h for h in highlighted_confirm) or any(target in h for h in arrow_confirm):
                     seen_target = True
                     break
 
-            _status(f'Confirmation highlight: {confirm_seen}', 'info')
-            if saw_any_highlight and not seen_target:
+            _status(f'Confirmation highlight: {confirm_seen} | arrow: {confirm_arrow_seen}', 'info')
+            if (saw_any_highlight or saw_any_arrow) and not seen_target:
                 _status(f'"{target}" moved before Enter. Continuing navigation...', 'warn')
                 continue
-            if (not saw_any_highlight) and (not seen_target):
+            if (not saw_any_highlight) and (not saw_any_arrow) and (not seen_target):
                 _status('Confirmation inconclusive (no highlight parsed). Trusting initial hit and pressing Enter...', 'warn')
 
             s.send_enter()
