@@ -526,6 +526,20 @@ def _hold_open_until_interrupt(title: str):
         time.sleep(1)
 
 
+def _hold_open_on_error(title: str):
+    """Keeps the tool open after a fatal error so the user can inspect the console."""
+    print()
+    print('=' * 60)
+    print(f'  {title} FAILED')
+    print('=' * 60)
+    print('  Process stopped due to an error/timeout.')
+    print('  Review the console and popup details above.')
+    print('  Serial session remains open. Press Ctrl+C to close this tool.')
+    print()
+    while True:
+        time.sleep(1)
+
+
 def _strip_ansi(data: bytes) -> str:
     """Strips ANSI escape codes from BIOS/terminal output."""
     text = data.decode('utf-8', errors='replace')
@@ -3024,6 +3038,7 @@ def run_efi_timing(com_port: str):
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
+            _hold_open_on_error('EFI TIMING')
             return
 
         _save_json_file(LAST_EFI_TIMING_CONFIG_FILE, {
@@ -3093,6 +3108,7 @@ def run_efi_timing(com_port: str):
         _status(f'EFI timing FAILED: {e}', 'fail')
         logging.error(f'EFI timing failed: {e}', exc_info=True)
         _alert_popup('EFI Timing FAILED', str(e))
+        _hold_open_on_error('EFI TIMING')
     finally:
         s.close()
         _status(f'Port {com_port} closed.', 'info')
@@ -3147,6 +3163,7 @@ def run_boot_svos_only(com_port: str):
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
+            _hold_open_on_error('BOOT SVOS')
             return
 
     _status(f'Abriendo {com_port}...', 'step')
@@ -3168,6 +3185,7 @@ def run_boot_svos_only(com_port: str):
         _status(f'Error during SVOS boot: {e}', 'fail')
         logging.error(f'Boot SVOS failed: {e}', exc_info=True)
         _alert_popup('Boot SVOS FAILED', str(e))
+        _hold_open_on_error('BOOT SVOS')
     finally:
         s.close()
         _status(f'Port {com_port} closed.', 'info')
@@ -3256,6 +3274,7 @@ def run_update_svos(com_port: str):
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
+            _hold_open_on_error('UPDATE SVOS')
             return
 
     _status(f'Abriendo {com_port}...', 'step')
@@ -3370,6 +3389,7 @@ def run_update_svos(com_port: str):
         _status(f'Error during SVOS update: {e}', 'fail')
         logging.error(f'Update SVOS failed: {e}', exc_info=True)
         _alert_popup('Update SVOS FAILED', str(e))
+        _hold_open_on_error('UPDATE SVOS')
     finally:
         s.close()
         _status(f'Port {com_port} closed.', 'info')
@@ -3404,6 +3424,7 @@ def run_boot_centos_direct(com_port: str):
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
+            _hold_open_on_error('BOOT CENTOS')
             return
 
     _status(f'Opening {com_port}...', 'step')
@@ -3436,6 +3457,7 @@ def run_boot_centos_direct(com_port: str):
         _status(f'Error during CentOS boot: {e}', 'fail')
         logging.error(f'Boot CentOS failed: {e}', exc_info=True)
         _alert_popup('CentOS Boot FAILED', str(e))
+        _hold_open_on_error('BOOT CENTOS')
     finally:
         s.close()
         _status(f'Port {com_port} closed.', 'info')
