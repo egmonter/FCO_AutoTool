@@ -1523,7 +1523,7 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
 
     if timings:
         TIMING_LABELS = {
-            'overwrite_wait': 'Overwrite wait',
+            'overwrite_wait': 'Bootscript Excecution (Fuse Overwrite)',
             'boot':           'Boot SVOS',
             'supercollider':  'SuperCollider',
             'rocket_cpu_iax': 'Rocket cpu+iax',
@@ -3245,7 +3245,7 @@ def run_boot_svos_only(com_port: str):
             qdf = qdfs[0]
         try:
             _do_sv_overwrite_wait(qdf, ult0, soc, kwargs,
-                                  monitor_label='Boot SVOS - overwrite coordination')
+                                  monitor_label='Bootscript Excecution (Fuse Overwrite)')
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
