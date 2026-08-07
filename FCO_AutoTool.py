@@ -120,6 +120,7 @@ BIOS_INT_SHELL = 'Internal Shell'      # option inside Boot Manager
 BIOS_NAV_MAX   = 20                    # maximum down-arrow presses before error
 BIOS_ARROW_DELAY = 1.5                 # wait between DOWN presses to avoid overshooting menu items
 BIOS_ENTER_CONFIRM_DELAY = 2.5         # wait before ENTER to let menu highlight settle
+BIOS_POST_DETECT_WAIT = 10             # wait after BIOS/F2 screen before parsing menus
 
 # EFI Shell prompts (adjust if they differ on your platform)
 EFI_PROMPTS   = [b'Shell>', b'shell>', b'EFI Shell']
@@ -990,7 +991,8 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
         _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
         _status('BIOS detected.', 'ok')
-        time.sleep(1)
+        _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
+        time.sleep(BIOS_POST_DETECT_WAIT)
 
         # 2+3. Navigate Boot Manager Menu -> UEFI Internal Shell with retry via ESC
         for nav_retry in range(BIOS_NAV_RETRIES):
@@ -1197,7 +1199,8 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
         _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
     _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
     _status('BIOS detected.', 'ok')
-    time.sleep(1)
+    _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
+    time.sleep(BIOS_POST_DETECT_WAIT)
 
     for nav_retry in range(BIOS_NAV_RETRIES):
         try:
