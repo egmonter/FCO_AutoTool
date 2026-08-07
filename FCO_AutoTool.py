@@ -1020,8 +1020,9 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         _break_internal_shell_countdown(s)
         _status('Waiting for EFI Shell...', 'wait')
         with _guard('EFI Shell prompt'):
-            s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
-        _status('EFI Shell ready.', 'ok')
+            matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
+        matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
+        _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
 
         # 5. Look for SVOS grub on FS0, FS1, FS2
         booted = False
@@ -1209,8 +1210,9 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
     _break_internal_shell_countdown(s)
     _status('Waiting for EFI Shell...', 'wait')
     with _guard('EFI Shell prompt'):
-        s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
-    _status('EFI Shell ready.', 'ok')
+        matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
+    matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
+    _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
 
     booted = False
     login_seen = False
