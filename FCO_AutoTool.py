@@ -105,6 +105,7 @@ LAST_BOOT_CENTOS_CONFIG_FILE = BASE_DIR / 'last_boot_centos_config.json'
 LAST_UPDATE_CONFIG_FILE = BASE_DIR / 'last_update_config.json'
 LAST_EFI_TIMING_CONFIG_FILE = BASE_DIR / 'last_efi_timing_config.json'
 TIMEOUTS_CONFIG_FILE = BASE_DIR / 'timeouts_config.json'
+WRAPPER_CONFIG_FILE = BASE_DIR / 'config.json'
 
 # GitHub repo for auto-update
 GITHUB_REPO_URL = 'https://github.com/egmonter/FCO_AutoTool.git'
@@ -1896,7 +1897,11 @@ def _ask_qdf_params(label=''):
         print('  [!!] Invalid option, enter x4 or x1.')
 
     kwargs = {}
+    default_kwargs = _load_wrapper_default_kwargs()
     print()
+    print('Default wrapper kwargs from config.json:')
+    print(f'  {_format_kwargs_compact(default_kwargs)}')
+    print('  Extra kwargs below are optional overrides/additions to those defaults.')
     print("Optional extra kwargs (e.g.: pwrgoodmethod='usb', fused_unit=False, extra_args={'disable_axon': True})")
     print("  Leave blank if not needed.")
     while True:
@@ -2215,6 +2220,25 @@ def _load_json_file(path: Path):
             return json.load(f)
     except Exception:
         return None
+
+
+def _load_wrapper_default_kwargs() -> dict:
+    """Loads default wrapper kwargs from config.json for user display."""
+    data = _load_json_file(WRAPPER_CONFIG_FILE)
+    if not isinstance(data, dict):
+        return {
+            'proj': 'DMRUCC',
+            'stepping': 'a0',
+            'pwrgoodmethod': 'usb',
+            'fused_unit': False,
+            'pwrgooddelay': 30,
+            'extra_args': {'disable_axon': True},
+        }
+    return {k: v for k, v in data.items() if not str(k).startswith('_')}
+
+
+def _format_kwargs_compact(kwargs: dict) -> str:
+    return ', '.join(f'{k}={v!r}' for k, v in kwargs.items())
 
 
 def _print_last_config(cfg: dict):
@@ -3035,6 +3059,9 @@ def run_efi_timing(com_port: str):
     print('=' * 60)
     print()
 
+    ifwi = get_ifwi_version()
+    _status(f'IFWI detected: {ifwi}', 'info')
+
     cfg_last = _load_json_file(LAST_EFI_TIMING_CONFIG_FILE)
     use_last = False
     if cfg_last is not None:
@@ -3114,6 +3141,7 @@ def run_efi_timing(com_port: str):
             print(f'  Overwrite ({qdf})                 : {_fmt_hms(overwrite_secs)}')
         else:
             print('  Overwrite                         : N/A (fused mode)')
+        print(f'  IFWI used                         : {ifwi}')
         print(f'  Post-overwrite to BIOS/EFI screen : {_fmt_hms(efi_secs)}')
         print(f'  Total measured time               : {_fmt_hms(total_secs)}')
         print('=' * 60)
@@ -3125,6 +3153,7 @@ def run_efi_timing(com_port: str):
         lines = [
             f'Date/Time: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
             f'COM: {com_port}',
+            f'IFWI: {ifwi}',
             f'Fused: {fused}',
             f'QDF: {qdf or "N/A"}',
             f'Overwrite: {_fmt_hms(overwrite_secs) if overwrite_secs is not None else "N/A"}',
@@ -3178,6 +3207,9 @@ def run_boot_svos_only(com_port: str):
     print('=' * 60)
     print('  BOOT SVOS')
     print('=' * 60)
+
+    ifwi = get_ifwi_version()
+    _status(f'IFWI detected: {ifwi}', 'info')
 
     cfg_last = _load_json_file(LAST_BOOT_SVOS_CONFIG_FILE)
     use_last = False
@@ -3262,6 +3294,9 @@ def run_update_svos(com_port: str):
     print('=' * 60)
     print('  UPDATE SVOS')
     print('=' * 60)
+
+    ifwi = get_ifwi_version()
+    _status(f'IFWI detected: {ifwi}', 'info')
 
     cfg_last = _load_json_file(LAST_UPDATE_CONFIG_FILE)
     use_last = False
@@ -3418,6 +3453,7 @@ def run_update_svos(com_port: str):
         print('=' * 60)
         rel_ok   = parsed.get('release', '?')
         patch_ok = parsed.get('patch',   '?')
+        print(f'  IFWI used         = {ifwi}')
         print(f'  SVOS release      = {rel_ok}')
         print(f'  SVOS patch        = {patch_ok}')
         if parsed.get('build_date'):
@@ -3468,6 +3504,9 @@ def run_boot_centos_direct(com_port: str):
     print('  BOOT CENTOS')
     print('=' * 60)
     print()
+
+    ifwi = get_ifwi_version()
+    _status(f'IFWI detected: {ifwi}', 'info')
 
     cfg_last = _load_json_file(LAST_BOOT_CENTOS_CONFIG_FILE)
     use_last = False

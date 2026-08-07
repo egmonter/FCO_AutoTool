@@ -4,5 +4,8 @@
   "stepping":      "a0",
   "pwrgoodmethod": "usb",
   "fused_unit":    false,
-  "pwrgooddelay":  30
+  "pwrgooddelay":  30,
+  "extra_args": {
+    "disable_axon": true
+  }
 }
