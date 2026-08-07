@@ -143,6 +143,11 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
             )
             print(f"  SVOS ready. Continuing with {qdf}.")
 
+        # Signal AutoTool that overwrite execution is starting now.
+        sv_started = sig_dir / f'{qdf}_sv_started.signal'
+        sv_started.write_text('started\n')
+        print(f"  Start signal written: {sv_started.name}")
+
         # Execute fuse overwrite
         try:
             _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc, **item_kwargs)

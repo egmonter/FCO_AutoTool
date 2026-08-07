@@ -115,6 +115,8 @@ BIOS_BANNERS   = [b'OAKSTREAM', b'EDKII', b'Intel Corporation',
 BIOS_BOOT_MGR  = 'Boot Manager'        # option in the BIOS menu
 BIOS_INT_SHELL = 'Internal Shell'      # option inside Boot Manager
 BIOS_NAV_MAX   = 20                    # maximum down-arrow presses before error
+BIOS_ARROW_DELAY = 1.5                 # wait between DOWN presses to avoid overshooting menu items
+BIOS_ENTER_CONFIRM_DELAY = 2.5         # wait before ENTER to let menu highlight settle
 
 # EFI Shell prompts (adjust if they differ on your platform)
 EFI_PROMPTS   = [b'Shell>', b'shell>', b'EFI Shell']
@@ -284,6 +286,16 @@ CONTENT_CMDS = {
 def _wait_for_file(filepath, poll: float = 10):
     """Waits indefinitely until the file exists."""
     while not Path(filepath).exists():
+        time.sleep(poll)
+
+
+def _wait_for_any_file(filepaths, poll: float = 1.0):
+    """Waits indefinitely until any file exists. Returns the first path that appears."""
+    paths = [Path(p) for p in filepaths]
+    while True:
+        for path in paths:
+            if path.exists():
+                return path
         time.sleep(poll)
 
 
@@ -705,11 +717,12 @@ class SVOSSession:
 # ---------------------------------------------------------------------------
 
 def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MAX,
-                       arrow_delay: float = 1.0):
+                       arrow_delay: float = BIOS_ARROW_DELAY):
     """
     Navigates the BIOS menu with down arrows looking for `target` as the HIGHLIGHTED item.
     EDK2 highlights the active item with ANSI color ESC[37mESC[40m (white on black).
-    When found: waits 1s and presses Enter.
+    When found: waits briefly, re-checks that the target is still highlighted,
+    and only then presses Enter.
     Raises FCOStepError if not found within max_steps attempts.
     """
     for attempt in range(max_steps):
@@ -718,8 +731,16 @@ def navigate_bios_menu(s: SVOSSession, target: str, max_steps: int = BIOS_NAV_MA
         _status(f'Attempt {attempt+1}/{max_steps} - highlighted: {highlighted}', 'wait')
 
         if any(target in h for h in highlighted):
-            _status(f'"{target}" is highlighted -> Enter in 1s', 'ok')
-            time.sleep(1.0)
+            _status(f'"{target}" is highlighted -> confirming for {BIOS_ENTER_CONFIRM_DELAY:.1f}s before Enter', 'ok')
+            time.sleep(BIOS_ENTER_CONFIRM_DELAY)
+
+            raw_confirm, _ = s.read_screen(wait=0.3)
+            highlighted_confirm = _highlighted_items(raw_confirm)
+            _status(f'Confirmation highlight: {highlighted_confirm}', 'info')
+            if not any(target in h for h in highlighted_confirm):
+                _status(f'"{target}" moved before Enter. Continuing navigation...', 'warn')
+                continue
+
             s.send_enter()
             time.sleep(0.5)
             return
@@ -873,7 +894,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         for nav_retry in range(BIOS_NAV_RETRIES):
             try:
                 _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
-                navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=1.0)
+                navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
 
                 # Verify that we entered Boot Manager Menu and not another menu (e.g. Boot Maintenance Manager)
                 time.sleep(1.0)
@@ -886,7 +907,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                 _status('Inside Boot Manager Menu.', 'ok')
 
                 _status(f'Looking for UEFI Internal Shell...', 'step')
-                navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=1.0)
+                navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
                 _status('UEFI Internal Shell selected.', 'ok')
                 break  # success, exit the retry loop
 
@@ -1064,7 +1085,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
     for nav_retry in range(BIOS_NAV_RETRIES):
         try:
             _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
-            navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=1.0)
+            navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
 
             time.sleep(1.0)
             _, screen_text = s.read_screen(wait=1.0)
@@ -1076,7 +1097,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
             _status('Inside Boot Manager Menu.', 'ok')
 
             _status('Looking for UEFI Internal Shell...', 'step')
-            navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=1.0)
+            navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
             _status('UEFI Internal Shell selected.', 'ok')
             break
 
@@ -2812,7 +2833,8 @@ def _ask_fused() -> bool:
         print('  [!!] Enter y or n.')
 
 
-def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
+def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None,
+                          monitor_label: str | None = None):
     """
     Coordinates with sv_automation (running in pysv) to perform the fuse overwrite.
     1. Writes qdf_list.json with the requested QDF.
@@ -2824,7 +2846,7 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
     SIGNAL_DIR.mkdir(parents=True, exist_ok=True)
 
     # Clean old signals
-    for name in [f'{qdf}_sv_done.signal', f'{qdf}_svos_done.signal']:
+    for name in [f'{qdf}_sv_started.signal', f'{qdf}_sv_done.signal', f'{qdf}_svos_done.signal']:
         sig = SIGNAL_DIR / name
         if sig.exists():
             sig.unlink()
@@ -2851,12 +2873,24 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None):
     print('      import sv_automation')
     print('      sv_automation.run_qdf_list(itp, sv, bs_wrap)')
     print()
+    print(f'  Waiting for overwrite start signal ({qdf}_sv_started.signal)...')
     print(f'  Waiting for overwrite completion signal ({qdf}_sv_done.signal)...')
     print()
 
-    # Wait for the sv_done signal
+    # Wait for either the new start signal or the legacy done signal directly.
+    sv_started = SIGNAL_DIR / f'{qdf}_sv_started.signal'
     sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
-    _wait_for_file(sv_done)
+    first_signal = _wait_for_any_file([sv_started, sv_done], poll=1)
+
+    if first_signal == sv_started:
+        _status(f'Overwrite of {qdf} started by sv_automation.', 'info')
+        if monitor_label:
+            with _monitor_stage(monitor_label):
+                _wait_for_file(sv_done, poll=1)
+        else:
+            _wait_for_file(sv_done, poll=1)
+    else:
+        _status(f'Overwrite of {qdf} completed without start signal (legacy sv_automation).', 'info')
 
     content = sv_done.read_text(encoding='utf-8').strip()
     if content == 'error':
@@ -3108,8 +3142,8 @@ def run_boot_svos_only(com_port: str):
             print('[!] For Boot SVOS only the first QDF is used for the overwrite.')
         qdf = qdfs[0]
         try:
-            with _monitor_stage('Boot SVOS - overwrite coordination'):
-                _do_sv_overwrite_wait(qdf, ult0, soc, kwargs)
+            _do_sv_overwrite_wait(qdf, ult0, soc, kwargs,
+                                  monitor_label='Boot SVOS - overwrite coordination')
         except Exception as e:
             _status(f'Error in overwrite: {e}', 'fail')
             _alert_popup('Overwrite FAILED', str(e))
