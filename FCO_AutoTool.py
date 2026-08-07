@@ -124,7 +124,7 @@ BIOS_ENTER_CONFIRM_DELAY = 2.5         # wait before ENTER to let menu highlight
 # EFI Shell prompts (adjust if they differ on your platform)
 EFI_PROMPTS   = [b'Shell>', b'shell>', b'EFI Shell']
 SVOS_PROMPT   = b'root@'  # SVOS shell prompt prefix (hostname can vary: sut, dhcp1, etc.)
-SVOS_LOGIN_PROMPTS = [b' login:', b'login:']
+SVOS_LOGIN_PROMPTS = [b' login:', b'login:', b'Login:']
 CENTOS_LOGIN_PROMPTS = [b'dmr-bkc login:', b' login:']
 CENTOS_SHELL_PROMPTS = [b'# ', b'root@', b'[root@']
 
@@ -1103,9 +1103,16 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         _status('Temporary shell ready. Running login...', 'step')
         s.send('login')
 
-        # 8. Login: wait for generic "<hostname> login:" prompt, then send credentials
-        with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
-            s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=30)
+        # 8. Login: wait for generic "<hostname> login:" prompt, then send credentials.
+        # Some platforms redraw slowly; if the first wait times out, send ENTER and retry once.
+        try:
+            with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
+                s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
+        except TimeoutError:
+            _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
+            s.send_enter()
+            with _guard('SVOS login prompt retry (hostname login:)'):
+                s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
         _status('Entering user: root', 'step')
         s.send('root')
 
