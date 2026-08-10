@@ -2123,7 +2123,7 @@ def _decide_skip_boot_from_serial(s: SVOSSession) -> bool:
     return False
 
 
-def _is_svos_prompt_ready(s: SVOSSession, timeout: int = 8) -> bool:
+def _is_svos_prompt_ready(s: SVOSSession, timeout: int = 4) -> bool:
     """Checks if serial is currently at an active SVOS prompt."""
     try:
         # Two ENTER round-trips reduce false positives from stale root@ text.
