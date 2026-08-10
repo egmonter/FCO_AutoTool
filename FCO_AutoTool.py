@@ -403,8 +403,16 @@ class _PopupRuntimeMonitor:
             self._pin_button = ttk.Button(header, text='Pin', width=8, command=self._toggle_pin)
             self._pin_button.pack(side='right')
 
-            self._text = tk.Text(container, height=14, width=78, state='disabled')
-            self._text.pack(fill='both', expand=True, pady=(8, 0))
+            text_frame = ttk.Frame(container)
+            text_frame.pack(fill='both', expand=True, pady=(8, 0))
+
+            self._text = tk.Text(text_frame, height=14, width=78, state='disabled')
+            self._text.pack(side='left', fill='both', expand=True)
+
+            self._scrollbar = ttk.Scrollbar(text_frame, orient='vertical', command=self._text.yview)
+            self._scrollbar.pack(side='right', fill='y')
+            self._text.configure(yscrollcommand=self._scrollbar.set)
+
             self._text.bind('<Control-c>', self._copy_selection)
             self._text.bind('<Control-C>', self._copy_selection)
 
