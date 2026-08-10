@@ -120,7 +120,7 @@ BIOS_INT_SHELL = 'Internal Shell'      # option inside Boot Manager
 BIOS_NAV_MAX   = 20                    # maximum down-arrow presses before error
 BIOS_ARROW_DELAY = 1.5                 # wait between DOWN presses to avoid overshooting menu items
 BIOS_ENTER_CONFIRM_DELAY = 2.5         # wait before ENTER to let menu highlight settle
-BIOS_POST_DETECT_WAIT = 10             # wait after BIOS/F2 screen before parsing menus
+BIOS_POST_DETECT_WAIT = 15             # wait after BIOS/F2 screen before parsing menus
 
 # EFI Shell prompts (adjust if they differ on your platform)
 EFI_PROMPTS   = [b'Shell>', b'shell>', b'EFI Shell']
@@ -1312,21 +1312,55 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
 def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
     """Creates and enters the working directory for the QDF."""
     work_dir = f'/root/FCO/FCO_WW{week}/{qdf}'
+
+    def _read_svos_prompt_resilient(step_desc: str, timeout: int = CMD_TIMEOUT,
+                                    retries: int = 1, retry_sleep: float = 0.5) -> bytes:
+        """Reads until SVOS prompt, retrying automatically with ENTER on transient stalls."""
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                attempt_desc = step_desc if attempt == 0 else f'{step_desc} (retry {attempt}/{retries})'
+                with _guard(attempt_desc):
+                    return s.read_until(SVOS_PROMPT, timeout=timeout)
+            except FCOStepError as e:
+                last_err = e
+                if attempt >= retries:
+                    break
+                _status(
+                    f'{step_desc}: prompt timeout/stall. Sending ENTER and retrying ({attempt + 1}/{retries})...',
+                    'warn'
+                )
+                s.send_enter()
+                time.sleep(retry_sleep)
+        raise last_err
+
+    _status('Checking SVOS prompt responsiveness before directory setup...', 'wait')
+    _read_svos_prompt_resilient('validar prompt SVOS antes de crear directorio', timeout=30, retries=1)
+
     _status(f'Creating directory: {work_dir}', 'step')
     s.send(f'mkdir -p {work_dir} && cd {work_dir}')
-    with _guard(f'crear/entrar a {work_dir}'):
-        s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+    out_dir = _read_svos_prompt_resilient(f'crear/entrar a {work_dir}', timeout=CMD_TIMEOUT, retries=1)
+
+    # Confirm the shell really moved to the expected directory.
+    if work_dir.encode() not in out_dir:
+        _status('Directory change not confirmed in command output. Verifying with pwd...', 'warn')
+        s.send('pwd')
+        out_pwd = _read_svos_prompt_resilient('verificar working dir con pwd', timeout=CMD_TIMEOUT, retries=1)
+        if work_dir.encode() not in out_pwd:
+            _status('pwd mismatch. Re-entering target directory once...', 'warn')
+            s.send(f'cd {work_dir}; pwd')
+            out_cd = _read_svos_prompt_resilient('reingresar y verificar working dir', timeout=CMD_TIMEOUT, retries=1)
+            if work_dir.encode() not in out_cd:
+                raise FCOStepError(f'Could not confirm working directory: {work_dir}')
 
     # Copy required files for MLC from FCO_Scripts
     _status('Copying mlc and datapattern from ~/FCO_Scripts ...', 'step')
     for f in ['mlc', 'datapattern_halfA_half5.txt']:
         s.send(f'cp ~/FCO_Scripts/{f} .')
-        with _guard(f'copy {f} - verify it exists in ~/FCO_Scripts/'):
-            s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+        _read_svos_prompt_resilient(f'copy {f} - verify it exists in ~/FCO_Scripts/', timeout=CMD_TIMEOUT, retries=1)
         _status(f'  {f} copied', 'info')
     s.send('chmod +x mlc')
-    with _guard('chmod mlc'):
-        s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+    _read_svos_prompt_resilient('chmod mlc', timeout=CMD_TIMEOUT, retries=1)
 
     _pause('Setup ready — validate the directory in Raritan and press any key to start tests...')
 
@@ -1377,17 +1411,20 @@ def run_rocket(s: SVOSSession) -> dict:
 
     # 1) CPU first
     cpu_cmd, cpu_label = ROCKET_CMDS[0]
-    results[cpu_label] = _run_rocket_cmd(s, cpu_cmd, cpu_label)
+    with _monitor_stage(f'Rocket {cpu_label}'):
+        results[cpu_label] = _run_rocket_cmd(s, cpu_cmd, cpu_label)
     _pause(f'Rocket {cpu_label} {results[cpu_label]} — press any key to continue...')
 
     # 2) DSA/VTD fast path in the middle (no recovery sequence here)
     dsa_cmd, dsa_label = ROCKET_DSA_CMD
-    results[dsa_label] = _run_rocket_cmd(s, dsa_cmd, dsa_label)
+    with _monitor_stage(f'Rocket {dsa_label}'):
+        results[dsa_label] = _run_rocket_cmd(s, dsa_cmd, dsa_label)
     _pause(f'Rocket DSA/VTD fast path {results[dsa_label]} — press any key to continue...')
 
     # 3) IAX last among base Rocket configs
     iax_cmd, iax_label = ROCKET_CMDS[1]
-    results[iax_label] = _run_rocket_cmd(s, iax_cmd, iax_label)
+    with _monitor_stage(f'Rocket {iax_label}'):
+        results[iax_label] = _run_rocket_cmd(s, iax_cmd, iax_label)
     _pause(f'Rocket {iax_label} {results[iax_label]} — press any key to continue...')
 
     return results
@@ -2569,9 +2606,9 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['supercollider'] = 'SKIPPED'
 
             if _should_run(content, 'rocket'):
-                rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s,
+                rocket_res = _run_safe('Rocket suite', run_rocket, s,
                                        _tkey='rocket_cpu_iax',
-                                       _monitor_label=f'{qdf} - Rocket cpu/dsa-vtd/iax')
+                                       _monitor_label=f'{qdf} - Rocket suite')
                 if isinstance(rocket_res, dict):
                     results.update(rocket_res)
                 else:
