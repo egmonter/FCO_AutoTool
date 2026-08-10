@@ -2109,6 +2109,20 @@ def _ask_skip_boot_if_in_svos() -> bool:
     return resp in ('s', 'y', 'yes')
 
 
+def _decide_skip_boot_from_serial(s: SVOSSession) -> bool:
+    """
+    Auto-detects whether SVOS is already active.
+    Prompts for skip only when a live SVOS prompt is detected.
+    """
+    _status('Checking if SVOS prompt is active before skip-boot prompt...', 'info')
+    if _is_svos_prompt_ready(s):
+        _status('Active SVOS prompt detected.', 'ok')
+        return _ask_skip_boot_if_in_svos()
+
+    _status('SVOS prompt not detected. Continuing with normal boot flow (no skip prompt).', 'info')
+    return False
+
+
 def _is_svos_prompt_ready(s: SVOSSession, timeout: int = 8) -> bool:
     """Checks if serial is currently at an active SVOS prompt."""
     try:
@@ -3953,7 +3967,7 @@ def main():
                 _status('Mode 4: Fused unit — ignoring the current boot.', 'info')
                 _status('        Waiting for SV to start the overwrite...', 'info')
 
-            skip_boot_fco = _ask_skip_boot_if_in_svos()
+            skip_boot_fco = _decide_skip_boot_from_serial(s)
 
             summary_ult0 = ult0
             all_results  = _run_main_loop(s, qdf_list, week, ult0, ifwi, mode,
@@ -4001,7 +4015,7 @@ def main():
 
             s = _open_serial(com_port)
             s.flush()
-            skip_boot_fused = _ask_skip_boot_if_in_svos()
+            skip_boot_fused = _decide_skip_boot_from_serial(s)
 
             print(f'\n{"="*60}')
             _status(f'Mode 2 — Testing fused QDF: {qdf}', 'step')
@@ -4093,7 +4107,7 @@ def main():
 
             s = _open_serial(com_port)
             s.flush()
-            skip_boot_phase_a = _ask_skip_boot_if_in_svos()
+            skip_boot_phase_a = _decide_skip_boot_from_serial(s)
 
             # PHASE A: test the fused QDF
             print(f'\n{"="*60}')
