@@ -2592,6 +2592,9 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
     all_results  = []
     retry_needed = []
 
+    _status('If pysv helper is not running yet, execute the commands below in your pysv console.', 'info')
+    _print_pysv_overwrite_instructions()
+
     skip_boot_once = skip_initial_boot
 
     for i, item in enumerate(qdf_list):
@@ -2603,13 +2606,25 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
         print(f'{"="*60}')
 
         try:
+            sv_started = SIGNAL_DIR / f'{qdf}_sv_started.signal'
             sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
-            _status(f'Waiting for SV to complete the fuse overwrite of {qdf}...', 'wait')
-            t0_ow = time.time()
-            with _monitor_stage(f'{qdf} - Bootscript Excecution (Fuse Overwrite)'):
-                wait_for_signal(sv_done)
-            if CRONOS_MODE:
-                _timings.setdefault(qdf, {})['overwrite_wait'] = time.time() - t0_ow
+            _status(f'Waiting for SV to start/complete the fuse overwrite of {qdf}...', 'wait')
+
+            first_signal = _wait_for_any_file([sv_started, sv_done], poll=1)
+            if first_signal == sv_started:
+                _status(f'Overwrite of {qdf} started by sv_automation.', 'info')
+                t0_ow = time.time()
+                with _monitor_stage(f'{qdf} - Bootscript Excecution (Fuse Overwrite)'):
+                    _wait_for_file(sv_done, poll=1)
+                if CRONOS_MODE:
+                    _timings.setdefault(qdf, {})['overwrite_wait'] = time.time() - t0_ow
+            else:
+                _status(f'Overwrite of {qdf} completed without start signal (legacy sv_automation).', 'info')
+
+            content_sv_done = sv_done.read_text(encoding='utf-8').strip()
+            if content_sv_done == 'error':
+                raise FCOStepError(f'sv_automation reported an error during overwrite of {qdf}.')
+
             _status(f'Fuse overwrite of {qdf} completed.', 'ok')
 
             # Clean CentOS power cycle signals from previous run (if any)
@@ -3158,18 +3173,7 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None,
     _status(f'qdf_list.json written: QDF={qdf}  ULT={ult0}  SOC={soc}', 'info')
 
     # Instructions for the user
-    print()
-    print('=' * 60)
-    print('  ACTION REQUIRED — Fuse Overwrite')
-    print('=' * 60)
-    print()
-    print('  In your pysv session, run:')
-    print()
-    print('      import sys')
-    print(f'      sys.path.insert(0, r\'{BASE_DIR}\')')
-    print('      import sv_automation')
-    print('      sv_automation.run_qdf_list(itp, sv, bs_wrap)')
-    print()
+    _print_pysv_overwrite_instructions()
     print(f'  Waiting for overwrite start signal ({qdf}_sv_started.signal)...')
     print(f'  Waiting for overwrite completion signal ({qdf}_sv_done.signal)...')
     print()
@@ -3200,6 +3204,23 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None,
     svos_done.write_text('done\n')
     _status(f'svos_done signal written for {qdf}.', 'info')
     _pause('TEST MODE: Overwrite handshake completed. Press any key to continue...')
+
+
+def _print_pysv_overwrite_instructions():
+    """Prints the canonical pysv commands required for overwrite flow."""
+    print()
+    print('=' * 60)
+    print('  ACTION REQUIRED — Fuse Overwrite')
+    print('=' * 60)
+    print()
+    print('  In your pysv session, run:')
+    print()
+    print('      import users.mkcummin.fle_bs_wrapper as bs_wrap')
+    print('      import sys')
+    print(f'      sys.path.insert(0, r\'{BASE_DIR}\')')
+    print('      import sv_automation')
+    print('      sv_automation.run_qdf_list(itp, sv, bs_wrap)')
+    print()
 
 
 def _show_mode2_centos_pysv_instructions(qdf: str):

@@ -49,7 +49,7 @@ automatic timeout aborts.
   4 - Boot CentOS only
   5 - EFI Timing              (overwrite + time to BIOS/EFI gray screen)
 
-  Prefix t for TEST MODE (e.g. t1, t2, t3, t4)
+  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5)
 
 
 Then, depending on the tool selected:
@@ -92,7 +92,7 @@ TOOL 2 (Boot SVOS only):
   - COM port → same as above
   - Asks if unit is fused
   - If not fused: coordinates with sv_automation for overwrite
-  - Boots SVOS and leaves at root@sut:/> prompt
+  - Boots SVOS and leaves at root@... prompt
   - Keeps the tool window open after boot (Ctrl+C to close)
 
 TOOL 3 (Update SVOS):
@@ -113,6 +113,11 @@ TOOL 4 (Boot CentOS only):
 The script writes qdf_list.json with the entered parameters and then waits
 for the SV signal for each QDF. Do NOT close it.
 
+Skip-boot prompt behavior:
+  - FCO_AutoTool first probes the serial port for a live SVOS prompt (root@...)
+  - It asks "Skip boot (y/n)?" only when SVOS is actually detected
+  - If no SVOS prompt is detected, it continues normal boot flow automatically
+
 
 STEP 2 — Run sv_automation in your SV session
 -----------------------------------------------
@@ -125,6 +130,9 @@ In your already open SV session, paste this:
   sv_automation.run_qdf_list(itp, sv, bs_wrap)
 
   (The exact path is automatically updated each time FCO_AutoTool.py runs)
+
+FCO_AutoTool also prints the same pysv commands in-console during overwrite flow
+as an ACTION REQUIRED reminder.
 
 sv_automation.py reads qdf_list.json, performs forcereconfig/unlock/refresh, and
 runs bs_wrap.main() for each QDF, then writes the coordination signal.
@@ -151,7 +159,8 @@ CentOS power cycle automatically. It does not run the overwrite.
   forcereconfig / unlock            waiting for signal...
   sv.refresh()
   bs_wrap.main(QDF, ULT, SOC...)
-  writes {QDF}_sv_done.signal →     detects signal
+  writes {QDF}_sv_started.signal →  starts overwrite timer in monitor
+  writes {QDF}_sv_done.signal →     detects completion signal
                                     waits for reboot (10s) + flush buffer
                                     looks for BIOS screen (OAKSTREAM/EDKII/UEFI)
                                     → navigates Boot Manager Menu
@@ -159,7 +168,7 @@ CentOS power cycle automatically. It does not run the overwrite.
                                     → waits for EFI Shell prompt
                                     → looks for \\EFI\\debian\\grubx64.efi on FS0/FS1/FS2
                                     → ENTER (ATTENTION prompt)
-                                    → waits for root@sut:/>
+                                    → waits for root@... prompt
                                     → login (root / svos)
                                     → mountsv
                                     → mkdir /root/FCO/FCO_WW{week}/{QDF}
