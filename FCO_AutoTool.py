@@ -2112,7 +2112,10 @@ def _ask_skip_boot_if_in_svos() -> bool:
 def _is_svos_prompt_ready(s: SVOSSession, timeout: int = 8) -> bool:
     """Checks if serial is currently at an active SVOS prompt."""
     try:
+        # Two ENTER round-trips reduce false positives from stale root@ text.
         s.flush()
+        s.send_enter()
+        s.read_until_any([SVOS_PROMPT], timeout=timeout)
         s.send_enter()
         s.read_until_any([SVOS_PROMPT], timeout=timeout)
         return True
@@ -2466,6 +2469,15 @@ def _open_serial(com_port: str) -> 'SVOSSession':
         try:
             s = SVOSSession(com_port)
             logging.info(f'Port {com_port} opened at {BAUDRATE} baud.')
+            # Clear stale serial/driver leftovers so a new run starts from a clean buffer.
+            try:
+                s.ser.reset_input_buffer()
+                s.ser.reset_output_buffer()
+                time.sleep(0.2)
+                s.flush()
+                logging.info(f'Initial serial buffer clear completed on {com_port}.')
+            except Exception as e:
+                logging.warning(f'Initial serial buffer clear warning on {com_port}: {e}')
             return s
         except serial.SerialException as e:
             logging.error(f'Could not open {com_port}: {e}')
@@ -3934,6 +3946,7 @@ def main():
             logging.info('Signals anteriores eliminadas.')
 
             s = _open_serial(com_port)
+            s.flush()
 
             if mode == 4:
                 print()
@@ -3987,6 +4000,7 @@ def main():
                 json.dump([{'qdf': qdf, 'ult0': ult0, 'soc': soc, 'content': fused_content}], f, indent=2)
 
             s = _open_serial(com_port)
+            s.flush()
             skip_boot_fused = _ask_skip_boot_if_in_svos()
 
             print(f'\n{"="*60}')
@@ -4078,6 +4092,7 @@ def main():
                          f'Fused QDF: {qdf_fused} | QDFs overwrite: {[i["qdf"] for i in qdf_list]}')
 
             s = _open_serial(com_port)
+            s.flush()
             skip_boot_phase_a = _ask_skip_boot_if_in_svos()
 
             # PHASE A: test the fused QDF
