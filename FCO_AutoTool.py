@@ -522,6 +522,11 @@ class _PopupRuntimeMonitor:
 
         # Avoid unnecessary rewrites that would reset cursor/selection state.
         if content == self._last_render_text:
+            try:
+                if not self._text.tag_ranges('sel'):
+                    self._text.see('end')
+            except Exception:
+                pass
             return
 
         self._text.configure(state='normal')
@@ -529,6 +534,11 @@ class _PopupRuntimeMonitor:
         self._text.insert('1.0', content)
         self._text.configure(state='disabled')
         self._last_render_text = content
+        try:
+            if not self._text.tag_ranges('sel'):
+                self._text.see('end')
+        except Exception:
+            pass
 
     def start_stage(self, name: str):
         if self._failed.is_set() or (not self._ready.is_set()):
