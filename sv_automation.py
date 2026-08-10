@@ -361,6 +361,38 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     itp.forcereconfig()
     sv.refresh()
 
+    # Guard against known overwrite failure mode when hookstatus(0,3) is OUT/False.
+    hook_ok = True
+    try:
+        hook_ok = bool(itp.hookstatus(0, 3))
+        print(f"  hookstatus(0,3) -> {hook_ok}")
+    except Exception as e:
+        print(f"  [warn] Could not read hookstatus(0,3): {e}. Continuing without hook guard.")
+
+    if hook_ok is False:
+        print("  [warn] hookstatus(0,3)=False detected. Running holdhook + power cycle recovery...")
+        try:
+            itp.holdhook(0, 3, 1)
+            print("  holdhook(0,3,1) executed.")
+        except Exception as e:
+            raise RuntimeError(f"holdhook(0,3,1) failed: {e}")
+
+        _power_cycle_usb(context='hookstatus(0,3)=False pre-overwrite')
+
+        print("  Re-syncing ITP after power cycle...")
+        itp.forcereconfig()
+        itp.unlock()
+        itp.forcereconfig()
+        sv.refresh()
+
+        try:
+            hook_ok_after = bool(itp.hookstatus(0, 3))
+            print(f"  hookstatus(0,3) after recovery -> {hook_ok_after}")
+            if hook_ok_after is False:
+                raise RuntimeError('hookstatus(0,3) is still False after holdhook + power cycle')
+        except Exception as e:
+            raise RuntimeError(f"Unable to validate hookstatus(0,3) after recovery: {e}")
+
     # Build full parameters; kwargs overrides FIXED_PARAMS where keys overlap
     all_params = dict(qdf=qdf, ult0=ult0, soc=soc, **FIXED_PARAMS)
     all_params.update(kwargs)  # fused_unit, pwrgoodmethod, extra_args, etc.
@@ -372,6 +404,25 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
 
     bs_wrap.main(**all_params)
     print(f"  [OK] bs_wrap.main completed for {qdf}")
+
+
+def _power_cycle_usb(context: str = ''):
+    """Performs a USB power cycle and waits for platform boot readiness window."""
+    ctx = f' ({context})' if context else ''
+    try:
+        from diamondrapids.toolext.bootscript.toolbox.power_control.power_controller \
+            import PowerController
+        pc = PowerController(power_controller_name='usb')
+        print(f"  [PC{ctx}] Power OFF...")
+        pc.power_off()
+        print(f"  [PC{ctx}] Waiting 20s...")
+        time.sleep(20)
+        print(f"  [PC{ctx}] Power ON...")
+        pc.power_on()
+        print(f"  [PC{ctx}] Waiting 20s for system boot...")
+        time.sleep(20)
+    except Exception as e:
+        raise RuntimeError(f"power cycle failed{ctx}: {e}")
 
 
 def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
