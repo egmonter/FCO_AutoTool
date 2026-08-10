@@ -393,9 +393,26 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
         except Exception as e:
             raise RuntimeError(f"Unable to validate hookstatus(0,3) after recovery: {e}")
 
-    # Build full parameters; kwargs overrides FIXED_PARAMS where keys overlap
-    all_params = dict(qdf=qdf, ult0=ult0, soc=soc, **FIXED_PARAMS)
-    all_params.update(kwargs)  # fused_unit, pwrgoodmethod, extra_args, etc.
+    # Build wrapper args in canonical order to match the manual command semantics.
+    merged = dict(FIXED_PARAMS)
+    merged.update(kwargs)  # explicit user kwargs override config defaults
+
+    all_params = {
+        'qdf': qdf,
+        'ult0': ult0,
+        'proj': merged.get('proj', 'DMRUCC'),
+        'stepping': merged.get('stepping', 'a0'),
+        'soc': soc,
+        'pwrgoodmethod': merged.get('pwrgoodmethod', 'usb'),
+        'fused_unit': merged.get('fused_unit', False),
+        'extra_args': merged.get('extra_args', {'disable_axon': True}),
+        'pwrgooddelay': merged.get('pwrgooddelay', 30),
+    }
+
+    # Preserve any additional optional wrapper args beyond the canonical set.
+    for k, v in merged.items():
+        if k not in all_params:
+            all_params[k] = v
 
     params_str = ', '.join(f"{k}={v!r}" for k, v in all_params.items())
     print(f"\n  Command to run:")
