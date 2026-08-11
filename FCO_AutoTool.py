@@ -98,6 +98,7 @@ BASE_DIR      = Path(__file__).parent
 SIGNAL_DIR    = BASE_DIR / 'signals'
 LOG_DIR       = BASE_DIR / 'logs'
 REPORTS_DIR   = LOG_DIR / 'reports'
+SERIAL_SEGMENT_LOG_DIR = LOG_DIR / 'Serial Logs'
 QDF_LIST_FILE    = BASE_DIR / 'qdf_list.json'
 LAST_CONFIG_FILE = BASE_DIR / 'last_config.json'
 LAST_BOOT_SVOS_CONFIG_FILE = BASE_DIR / 'last_boot_svos_config.json'
@@ -737,6 +738,12 @@ def _check_skip_key():
     return False
 
 
+def _sanitize_log_token(value: str) -> str:
+    """Sanitizes a string for use in log filenames."""
+    token = re.sub(r'[^A-Za-z0-9._-]+', '_', str(value or '').strip())
+    return token.strip('._-') or 'session'
+
+
 # ---------------------------------------------------------------------------
 # Serial helper
 # ---------------------------------------------------------------------------
@@ -749,6 +756,45 @@ class SVOSSession:
         self.ser     = serial.Serial(port, baudrate, timeout=0.1)
         self.log     = logging.getLogger('serial')
         self.buf     = b''
+        self._capture_stack = []
+
+    def begin_serial_capture(self, phase_name: str):
+        """Starts a serial transcript capture for a specific boot phase."""
+        capture = {
+            'phase': _sanitize_log_token(phase_name),
+            'started_at': datetime.datetime.now(),
+            'parts': [],
+        }
+        self._capture_stack.append(capture)
+        return capture
+
+    def end_serial_capture(self):
+        """Ends the latest serial transcript capture and writes it to disk."""
+        if not self._capture_stack:
+            return None
+        capture = self._capture_stack.pop()
+        SERIAL_SEGMENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = capture['started_at'].strftime('%Y%m%d_%H%M%S_%f')
+        port_token = _sanitize_log_token(self.port)
+        out = SERIAL_SEGMENT_LOG_DIR / f'{ts}_{port_token}_{capture["phase"]}.log'
+        header = [
+            f'Date/Time: {capture["started_at"].strftime("%Y-%m-%d %H:%M:%S")}',
+            f'COM: {self.port}',
+            f'Phase: {capture["phase"]}',
+            '-' * 70,
+            '',
+        ]
+        out.write_text('\n'.join(header) + ''.join(capture['parts']), encoding='utf-8')
+        return out
+
+    def _capture_text(self, text: str):
+        if not text or not self._capture_stack:
+            return
+        for capture in self._capture_stack:
+            capture['parts'].append(text)
+
+    def _capture_tx(self, text: str):
+        self._capture_text(f'\n[TX] {text}\n')
 
     def send_arrow_down(self):
         """Sends the down arrow key (ANSI escape)."""
@@ -778,6 +824,7 @@ class SVOSSession:
 
     def send(self, cmd: str):
         self.log.info(f'>>> {cmd!r}')
+        self._capture_tx(repr(cmd))
         self.ser.write((cmd + '\r\n').encode())
 
     def send_slow(self, cmd: str, char_delay: float = 0.05):
@@ -786,6 +833,7 @@ class SVOSSession:
         Use when the terminal cannot process fast input (e.g.: EFI Shell).
         """
         self.log.info(f'>>> (slow) {cmd!r}')
+        self._capture_tx(f'(slow) {cmd!r}')
         for ch in cmd:
             self.ser.write(ch.encode())
             time.sleep(char_delay)
@@ -793,13 +841,16 @@ class SVOSSession:
         self.ser.write(b'\r\n')
 
     def send_enter(self):
+        self._capture_tx('<ENTER>')
         self.ser.write(b'\r\n')
 
     def send_escape(self):
         """Sends the ESC key to go back to the previous menu in BIOS."""
+        self._capture_tx('<ESC>')
         self.ser.write(b'\x1b')
 
     def send_key(self, raw: bytes):
+        self._capture_tx(f'<RAW {raw!r}>')
         self.ser.write(raw)
 
     # ---- read ----
@@ -847,10 +898,11 @@ class SVOSSession:
     def close(self):
         self.ser.close()
 
-    @staticmethod
-    def _print(data: bytes):
+    def _print(self, data: bytes):
         try:
-            print(data.decode('utf-8', errors='replace'), end='', flush=True)
+            text = data.decode('utf-8', errors='replace')
+            self._capture_text(text)
+            print(text, end='', flush=True)
         except Exception:
             pass
 
@@ -1053,153 +1105,167 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             -> FS0/FS1/FS2 -> \\efi\\debian\\grubx64.efi -> ENTER (ATTENTION) -> login
       -> mountsv (solo si do_mountsv=True)
     """
-    with _monitor_stage('Boot to EFI'):
-        # 1. Wait for the BIOS screen (the system needs time to reboot)
-        _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
-        time.sleep(BIOS_REBOOT_WAIT)
-        s.flush()  # flush accumulated buffer during reboot
+    s.begin_serial_capture('boot_to_efi')
+    boot_to_efi_log = None
+    try:
+        with _monitor_stage('Boot to EFI'):
+            # 1. Wait for the BIOS screen (the system needs time to reboot)
+            _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+            time.sleep(BIOS_REBOOT_WAIT)
+            s.flush()  # flush accumulated buffer during reboot
 
-        _status('Looking for BIOS screen...', 'wait')
-        _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
-        if fused_nudge:
-            _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
-        _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
-        _status('BIOS detected.', 'ok')
-        _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
-        time.sleep(BIOS_POST_DETECT_WAIT)
+            _status('Looking for BIOS screen...', 'wait')
+            _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
+            if fused_nudge:
+                _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
+            _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
+            _status('BIOS detected.', 'ok')
+            _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
+            time.sleep(BIOS_POST_DETECT_WAIT)
 
-        # 2+3. Navigate Boot Manager Menu -> UEFI Internal Shell with retry via ESC
-        for nav_retry in range(BIOS_NAV_RETRIES):
-            try:
-                _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
-                navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
+            # 2+3. Navigate Boot Manager Menu -> UEFI Internal Shell with retry via ESC
+            for nav_retry in range(BIOS_NAV_RETRIES):
+                try:
+                    _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
+                    navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
 
-                # Verify that we entered Boot Manager Menu and not another menu.
-                # Use Internal Shell presence as positive signal to avoid false
-                # negatives caused by transient/partial screen redraw text.
-                time.sleep(1.0)
-                raw, screen_text = s.read_screen(wait=1.0)
-                internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
-                if not internal_shell_visible:
-                    _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
-                    s.send_escape()
-                    time.sleep(1.5)
-                    continue  # retry from the top of the loop
-                _status('Inside Boot Manager Menu.', 'ok')
+                    # Verify that we entered Boot Manager Menu and not another menu.
+                    # Use Internal Shell presence as positive signal to avoid false
+                    # negatives caused by transient/partial screen redraw text.
+                    time.sleep(1.0)
+                    raw, screen_text = s.read_screen(wait=1.0)
+                    internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
+                    if not internal_shell_visible:
+                        _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
+                        s.send_escape()
+                        time.sleep(1.5)
+                        continue  # retry from the top of the loop
+                    _status('Inside Boot Manager Menu.', 'ok')
 
-                _status(f'Looking for UEFI Internal Shell...', 'step')
-                navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
-                _status('UEFI Internal Shell selected.', 'ok')
-                break  # success, exit the retry loop
+                    _status(f'Looking for UEFI Internal Shell...', 'step')
+                    navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
+                    _status('UEFI Internal Shell selected.', 'ok')
+                    break  # success, exit the retry loop
 
-            except FCOStepError as e:
-                if nav_retry < BIOS_NAV_RETRIES - 1:
-                    _status(f'Not found ({e}). ESC and retrying...', 'warn')
-                    s.send_escape()
-                    time.sleep(1.5)
-                else:
-                    raise FCOStepError(
-                        f'Could not navigate BIOS after {BIOS_NAV_RETRIES} intentos. '
-                        f'Last error: {e}')
+                except FCOStepError as e:
+                    if nav_retry < BIOS_NAV_RETRIES - 1:
+                        _status(f'Not found ({e}). ESC and retrying...', 'warn')
+                        s.send_escape()
+                        time.sleep(1.5)
+                    else:
+                        raise FCOStepError(
+                            f'Could not navigate BIOS after {BIOS_NAV_RETRIES} intentos. '
+                            f'Last error: {e}')
 
-    # 4. Break Internal Shell countdown (if present), then wait for prompt
-    _break_internal_shell_countdown(s)
-    _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
-    time.sleep(INT_SHELL_POST_ESC_WAIT)
-    _status('Sending ENTER after post-ESC settle...', 'step')
-    s.send_enter()
-    _status('Waiting for EFI Shell...', 'wait')
-    with _guard('EFI Shell prompt'):
-        matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
-    matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
-    _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
+        # 4. Break Internal Shell countdown (if present), then wait for prompt
+        _break_internal_shell_countdown(s)
+        _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
+        time.sleep(INT_SHELL_POST_ESC_WAIT)
+        _status('Sending ENTER after post-ESC settle...', 'step')
+        s.send_enter()
+        _status('Waiting for EFI Shell...', 'wait')
+        with _guard('EFI Shell prompt'):
+            matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
+        matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
+        _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
+    finally:
+        boot_to_efi_log = s.end_serial_capture()
+        if boot_to_efi_log:
+            _status(f'Serial boot log saved: {boot_to_efi_log}', 'info')
 
     # 5. Look for SVOS grub on FS0, FS1, FS2
+    s.begin_serial_capture('efi_to_svos')
+    efi_to_svos_log = None
     booted = False
-    for fs in ('FS0', 'FS1', 'FS2'):
-        _status(f'Trying {fs}: ...', 'step')
-        s.flush()
-        s.send(f'{fs}:')
-        try:
-            s.read_until(f'{fs}:\\', timeout=15)
-        except TimeoutError:
-            _status(f'{fs}: not available, trying next...', 'info')
-            continue
+    try:
+        for fs in ('FS0', 'FS1', 'FS2'):
+            _status(f'Trying {fs}: ...', 'step')
+            s.flush()
+            s.send(f'{fs}:')
+            try:
+                s.read_until(f'{fs}:\\', timeout=15)
+            except TimeoutError:
+                _status(f'{fs}: not available, trying next...', 'info')
+                continue
 
-        _status(f'Launching {SVOS_GRUB_PATH} from {fs}: ...', 'step')
-        s.send_slow(SVOS_GRUB_PATH, char_delay=0.05)
+            _status(f'Launching {SVOS_GRUB_PATH} from {fs}: ...', 'step')
+            s.send_slow(SVOS_GRUB_PATH, char_delay=0.05)
 
-        # If the file does NOT exist: the EFI shell returns the prompt in < 5s
-        # If the file DOES exist: there is no response for several seconds while it loads
-        # -> Wait 10s for the shell prompt; if it does not return = it is loading
-        ATTENTION  = b'Press <ENTER> within 10 seconds to drop to a login shell'
-        EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
-        try:
-            matched, _ = _read_until_any_with_periodic_enter(
-                s,
-                [ATTENTION] + EFI_PROMPT,
-                timeout=10,
-                enter_every=5,
-                tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
-            )
-            if matched == ATTENTION:
+            # If the file does NOT exist: the EFI shell returns the prompt in < 5s
+            # If the file DOES exist: there is no response for several seconds while it loads
+            # -> Wait 10s for the shell prompt; if it does not return = it is loading
+            ATTENTION  = b'Press <ENTER> within 10 seconds to drop to a login shell'
+            EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
+            try:
+                matched, _ = _read_until_any_with_periodic_enter(
+                    s,
+                    [ATTENTION] + EFI_PROMPT,
+                    timeout=10,
+                    enter_every=5,
+                    tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
+                )
+                if matched == ATTENTION:
+                    booted = True
+                    break
+                else:
+                    # The shell returned the prompt = file not found
+                    _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
+                    continue
+            except TimeoutError:
+                # No prompt within 10s = the file loaded and is booting, wait without limit
+                _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
+                _read_until_any_with_periodic_enter(
+                    s,
+                    [ATTENTION],
+                    timeout=None,
+                    enter_every=5,
+                    tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
+                )
                 booted = True
                 break
-            else:
-                # The shell returned the prompt = file not found
-                _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
-                continue
-        except TimeoutError:
-            # No prompt within 10s = the file loaded and is booting, wait without limit
-            _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
-            _read_until_any_with_periodic_enter(
-                s,
-                [ATTENTION],
-                timeout=None,
-                enter_every=5,
-                tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
-            )
-            booted = True
-            break
 
-    if not booted:
-        raise FCOStepError(
-            f'No se encontro {SVOS_GRUB_PATH} en FS0:, FS1: ni FS2:. '
-            'Verifica que el filesystem este disponible.')
+        if not booted:
+            raise FCOStepError(
+                f'No se encontro {SVOS_GRUB_PATH} en FS0:, FS1: ni FS2:. '
+                'Verifica que el filesystem este disponible.')
 
-    _status('ATTENTION message detected. Sending ENTER...', 'step')
-    s.send_enter()
+        _status('ATTENTION message detected. Sending ENTER...', 'step')
+        s.send_enter()
 
-    with _monitor_stage('Boot to SVOS'):
-        # 7. Wait for the first root@... prompt (temporary post-ATTENTION shell)
-        _status('Loading SVOS...', 'wait')
-        with _guard('shell SVOS post-boot (root@... prompt)'):
-            s.read_until(SVOS_PROMPT, timeout=SVOS_TIMEOUT)
-        _status('Temporary shell ready. Running login...', 'step')
-        s.send('login')
+        with _monitor_stage('Boot to SVOS'):
+            # 7. Wait for the first root@... prompt (temporary post-ATTENTION shell)
+            _status('Loading SVOS...', 'wait')
+            with _guard('shell SVOS post-boot (root@... prompt)'):
+                s.read_until(SVOS_PROMPT, timeout=SVOS_TIMEOUT)
+            _status('Temporary shell ready. Running login...', 'step')
+            s.send('login')
 
-        # 8. Login: wait for generic "<hostname> login:" prompt, then send credentials.
-        # Some platforms redraw slowly; if the first wait times out, send ENTER and retry once.
-        try:
-            with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
-                s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
-        except TimeoutError:
-            _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
-            s.send_enter()
-            with _guard('SVOS login prompt retry (hostname login:)'):
-                s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
-        _status('Entering user: root', 'step')
-        s.send('root')
+            # 8. Login: wait for generic "<hostname> login:" prompt, then send credentials.
+            # Some platforms redraw slowly; if the first wait times out, send ENTER and retry once.
+            try:
+                with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
+                    s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
+            except TimeoutError:
+                _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
+                s.send_enter()
+                with _guard('SVOS login prompt retry (hostname login:)'):
+                    s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
+            _status('Entering user: root', 'step')
+            s.send('root')
 
-        with _guard('prompt "Password:"'):
-            s.read_until_any(['Password:', 'password:'], timeout=30)
-        _status('Entering password...', 'step')
-        s.send('svos')
+            with _guard('prompt "Password:"'):
+                s.read_until_any(['Password:', 'password:'], timeout=30)
+            _status('Entering password...', 'step')
+            s.send('svos')
 
-        # 9. Wait for the root@... prompt (authenticated session)
-        with _guard('successful login - verify user/password (root/svos)'):
-            s.read_until(SVOS_PROMPT, timeout=30)
-        _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
+            # 9. Wait for the root@... prompt (authenticated session)
+            with _guard('successful login - verify user/password (root/svos)'):
+                s.read_until(SVOS_PROMPT, timeout=30)
+            _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
+    finally:
+        efi_to_svos_log = s.end_serial_capture()
+        if efi_to_svos_log:
+            _status(f'Serial OS log saved: {efi_to_svos_log}', 'info')
 
     if not do_mountsv:
         return
@@ -1262,119 +1328,133 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
             -> FS0/FS1/FS2 -> \\efi\\centos\\grubx64.efi -> login root/root
       -> ifconfig (basic sanity check)
     """
-    _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
-    time.sleep(BIOS_REBOOT_WAIT)
-    s.flush()
+    s.begin_serial_capture('boot_to_efi')
+    boot_to_efi_log = None
+    try:
+        _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+        time.sleep(BIOS_REBOOT_WAIT)
+        s.flush()
 
-    _status('Looking for BIOS screen...', 'wait')
-    _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
-    if fused_nudge:
-        _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
-    _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
-    _status('BIOS detected.', 'ok')
-    _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
-    time.sleep(BIOS_POST_DETECT_WAIT)
+        _status('Looking for BIOS screen...', 'wait')
+        _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
+        if fused_nudge:
+            _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
+        _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
+        _status('BIOS detected.', 'ok')
+        _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
+        time.sleep(BIOS_POST_DETECT_WAIT)
 
-    for nav_retry in range(BIOS_NAV_RETRIES):
-        try:
-            _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
-            navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
+        for nav_retry in range(BIOS_NAV_RETRIES):
+            try:
+                _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
+                navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
 
-            time.sleep(1.0)
-            _, screen_text = s.read_screen(wait=1.0)
-            internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
-            if not internal_shell_visible:
-                _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
-                s.send_escape()
-                time.sleep(1.5)
-                continue
-            _status('Inside Boot Manager Menu.', 'ok')
+                time.sleep(1.0)
+                _, screen_text = s.read_screen(wait=1.0)
+                internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
+                if not internal_shell_visible:
+                    _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
+                    s.send_escape()
+                    time.sleep(1.5)
+                    continue
+                _status('Inside Boot Manager Menu.', 'ok')
 
-            _status('Looking for UEFI Internal Shell...', 'step')
-            navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
-            _status('UEFI Internal Shell selected.', 'ok')
-            break
+                _status('Looking for UEFI Internal Shell...', 'step')
+                navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
+                _status('UEFI Internal Shell selected.', 'ok')
+                break
 
-        except FCOStepError as e:
-            if nav_retry < BIOS_NAV_RETRIES - 1:
-                _status(f'Not found ({e}). ESC and retrying...', 'warn')
-                s.send_escape()
-                time.sleep(1.5)
-            else:
-                raise FCOStepError(
-                    f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
-                    f'Last error: {e}')
+            except FCOStepError as e:
+                if nav_retry < BIOS_NAV_RETRIES - 1:
+                    _status(f'Not found ({e}). ESC and retrying...', 'warn')
+                    s.send_escape()
+                    time.sleep(1.5)
+                else:
+                    raise FCOStepError(
+                        f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
+                        f'Last error: {e}')
 
-    _break_internal_shell_countdown(s)
-    _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
-    time.sleep(INT_SHELL_POST_ESC_WAIT)
-    _status('Sending ENTER after post-ESC settle...', 'step')
-    s.send_enter()
-    _status('Waiting for EFI Shell...', 'wait')
-    with _guard('EFI Shell prompt'):
-        matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
-    matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
-    _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
+        _break_internal_shell_countdown(s)
+        _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
+        time.sleep(INT_SHELL_POST_ESC_WAIT)
+        _status('Sending ENTER after post-ESC settle...', 'step')
+        s.send_enter()
+        _status('Waiting for EFI Shell...', 'wait')
+        with _guard('EFI Shell prompt'):
+            matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
+        matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
+        _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
+    finally:
+        boot_to_efi_log = s.end_serial_capture()
+        if boot_to_efi_log:
+            _status(f'Serial boot log saved: {boot_to_efi_log}', 'info')
 
+    s.begin_serial_capture('efi_to_centos')
+    efi_to_centos_log = None
     booted = False
     login_seen = False
-    for fs in ('FS0', 'FS1', 'FS2'):
-        _status(f'Trying {fs}: ...', 'step')
-        s.flush()
-        s.send(f'{fs}:')
-        try:
-            s.read_until(f'{fs}:\\', timeout=15)
-        except TimeoutError:
-            _status(f'{fs}: not available, trying next...', 'info')
-            continue
+    try:
+        for fs in ('FS0', 'FS1', 'FS2'):
+            _status(f'Trying {fs}: ...', 'step')
+            s.flush()
+            s.send(f'{fs}:')
+            try:
+                s.read_until(f'{fs}:\\', timeout=15)
+            except TimeoutError:
+                _status(f'{fs}: not available, trying next...', 'info')
+                continue
 
-        _pause(f'Ready to launch {CENTOS_GRUB_PATH} from {fs}:. Press any key to continue...')
-        _status(f'Launching {CENTOS_GRUB_PATH} from {fs}: ...', 'step')
-        s.send_slow(CENTOS_GRUB_PATH, char_delay=0.05)
+            _pause(f'Ready to launch {CENTOS_GRUB_PATH} from {fs}:. Press any key to continue...')
+            _status(f'Launching {CENTOS_GRUB_PATH} from {fs}: ...', 'step')
+            s.send_slow(CENTOS_GRUB_PATH, char_delay=0.05)
 
-        EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
-        try:
-            matched, _ = s.read_until_any(CENTOS_LOGIN_PROMPTS + EFI_PROMPT, timeout=10)
-            if matched in CENTOS_LOGIN_PROMPTS:
+            EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
+            try:
+                matched, _ = s.read_until_any(CENTOS_LOGIN_PROMPTS + EFI_PROMPT, timeout=10)
+                if matched in CENTOS_LOGIN_PROMPTS:
+                    booted = True
+                    login_seen = True
+                    break
+                _status(f'{CENTOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
+                continue
+            except TimeoutError:
+                _status(f'{CENTOS_GRUB_PATH} loading on {fs}:, waiting for login prompt...', 'wait')
+                s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
                 booted = True
                 login_seen = True
                 break
-            _status(f'{CENTOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
-            continue
-        except TimeoutError:
-            _status(f'{CENTOS_GRUB_PATH} loading on {fs}:, waiting for login prompt...', 'wait')
-            s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
-            booted = True
-            login_seen = True
-            break
 
-    if not booted:
-        raise FCOStepError(
-            f'Could not find {CENTOS_GRUB_PATH} on FS0:, FS1: or FS2:. '
-            'Verify that the filesystem is available.')
+        if not booted:
+            raise FCOStepError(
+                f'Could not find {CENTOS_GRUB_PATH} on FS0:, FS1: or FS2:. '
+                'Verify that the filesystem is available.')
 
-    if not login_seen:
-        _status('Waiting for CentOS login prompt...', 'wait')
-        with _guard('CentOS login prompt'):
-            s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
+        if not login_seen:
+            _status('Waiting for CentOS login prompt...', 'wait')
+            with _guard('CentOS login prompt'):
+                s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
 
-    _status('Entering user: root', 'step')
-    s.send('root')
+        _status('Entering user: root', 'step')
+        s.send('root')
 
-    with _guard('prompt "Password:"'):
-        s.read_until_any(['Password:', 'password:'], timeout=30)
-    _status('Entering password...', 'step')
-    s.send('root')
+        with _guard('prompt "Password:"'):
+            s.read_until_any(['Password:', 'password:'], timeout=30)
+        _status('Entering password...', 'step')
+        s.send('root')
 
-    with _guard('CentOS shell prompt after login'):
-        s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
-    _status('CentOS login successful.', 'ok')
+        with _guard('CentOS shell prompt after login'):
+            s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
+        _status('CentOS login successful.', 'ok')
 
-    _status('Running ifconfig to validate the OS boot...', 'step')
-    s.send('ifconfig')
-    with _guard('ifconfig response in CentOS'):
-        s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
-    _status('CentOS boot validated with ifconfig.', 'ok')
+        _status('Running ifconfig to validate the OS boot...', 'step')
+        s.send('ifconfig')
+        with _guard('ifconfig response in CentOS'):
+            s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
+        _status('CentOS boot validated with ifconfig.', 'ok')
+    finally:
+        efi_to_centos_log = s.end_serial_capture()
+        if efi_to_centos_log:
+            _status(f'Serial OS log saved: {efi_to_centos_log}', 'info')
 
 
 # ---------------------------------------------------------------------------
