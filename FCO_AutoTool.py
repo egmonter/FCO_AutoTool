@@ -1671,8 +1671,8 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
         'rocket_dram_iax',
         'rocket_dram_dsa',
         'memicals',
-        'mlc',
         'solar',
+        'mlc',
         'svos_boot',
         'centos_boot',
     ]
@@ -1729,8 +1729,8 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
             'supercollider':  'SuperCollider',
             'rocket_cpu_iax': 'Rocket cpu+iax',
             'memicals':       'Memicals',
-            'mlc':            'MLC',
             'solar':          'Solar',
+            'mlc':            'MLC',
             'rocket_dsa':     'Rocket DSA',
             'svos_boot':      'SVOS Boot Check',
             'centos_boot':    'CentOS Boot',
@@ -2594,10 +2594,10 @@ def _open_serial(com_port: str) -> 'SVOSSession':
 
     results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals')
                            if _should_run(content, 'memicals') else 'SKIPPED')
-    results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc')
-                           if _should_run(content, 'mlc')      else 'SKIPPED')
     results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar')
                            if _should_run(content, 'solar')    else 'SKIPPED')
+    results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc')
+                           if _should_run(content, 'mlc')      else 'SKIPPED')
 
     if _should_run(content, 'rocket'):
         dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
@@ -2755,12 +2755,12 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals',
                                              _monitor_label=f'{qdf} - Memicals')
                                    if _should_run(content, 'memicals') else 'SKIPPED')
-            results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc',
-                                             _monitor_label=f'{qdf} - MLC')
-                                   if _should_run(content, 'mlc')      else 'SKIPPED')
             results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar',
                                              _monitor_label=f'{qdf} - Solar')
                                    if _should_run(content, 'solar')    else 'SKIPPED')
+            results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc',
+                                             _monitor_label=f'{qdf} - MLC')
+                                   if _should_run(content, 'mlc')      else 'SKIPPED')
 
             if _should_run(content, 'svos_boot'):
                 t0_svos_boot = time.time()
@@ -2953,12 +2953,12 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['memicals'] = (_run_safe_r('Memicals', run_memicals, s, _tkey='memicals',
                                                    _monitor_label=f'{qdf} - Retry Memicals')
                                        if _should_run(content_r, 'memicals') else 'SKIPPED')
-                results['mlc']      = (_run_safe_r('MLC', run_mlc, s, _tkey='mlc',
-                                                   _monitor_label=f'{qdf} - Retry MLC')
-                                       if _should_run(content_r, 'mlc')      else 'SKIPPED')
                 results['solar']    = (_run_safe_r('Solar', run_solar, s, _tkey='solar',
                                                    _monitor_label=f'{qdf} - Retry Solar')
                                        if _should_run(content_r, 'solar')    else 'SKIPPED')
+                results['mlc']      = (_run_safe_r('MLC', run_mlc, s, _tkey='mlc',
+                                                   _monitor_label=f'{qdf} - Retry MLC')
+                                       if _should_run(content_r, 'mlc')      else 'SKIPPED')
 
                 if _should_run(content_r, 'svos_boot'):
                     t0_svos_boot_r = time.time()
@@ -3111,12 +3111,12 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals',
                                      _monitor_label=f'{qdf} - Memicals')
                            if _should_run(content, 'memicals') else 'SKIPPED')
-    results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc',
-                                     _monitor_label=f'{qdf} - MLC')
-                           if _should_run(content, 'mlc')      else 'SKIPPED')
     results['solar']    = (_run_safe('Solar', run_solar, s, _tkey='solar',
                                      _monitor_label=f'{qdf} - Solar')
                            if _should_run(content, 'solar')    else 'SKIPPED')
+    results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc',
+                                     _monitor_label=f'{qdf} - MLC')
+                           if _should_run(content, 'mlc')      else 'SKIPPED')
 
     if _should_run(content, 'svos_boot'):
         t0_svos_boot = time.time()
