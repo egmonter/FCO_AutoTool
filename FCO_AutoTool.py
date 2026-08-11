@@ -1420,6 +1420,28 @@ def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
     return work_dir
 
 
+def _recover_svos_prompt_after_timeout(s: SVOSSession, context: str,
+                                       attempts: int = 3, prompt_timeout: int = 20) -> bool:
+    """Attempts to recover SVOS shell prompt after a timeout with Ctrl+C + ENTER."""
+    _status(f'{context}: timeout detected. Attempting SVOS prompt recovery...', 'warn')
+    for attempt in range(1, attempts + 1):
+        try:
+            _status(f'Prompt recovery attempt {attempt}/{attempts} (Ctrl+C + ENTER)...', 'wait')
+            s.send_key(b'\x03')
+            time.sleep(0.2)
+            s.send_enter()
+            with _guard(f'prompt recovery after timeout ({context})'):
+                s.read_until(SVOS_PROMPT, timeout=prompt_timeout)
+            _status(f'{context}: SVOS prompt recovered.', 'ok')
+            return True
+        except Exception as e:
+            _status(f'Recovery attempt {attempt}/{attempts} failed: {e}', 'warn')
+            time.sleep(0.4)
+
+    _status(f'{context}: could not recover SVOS prompt after timeout.', 'fail')
+    return False
+
+
 def run_supercollider(s: SVOSSession) -> str:
     _status('Running SuperCollider (sc -M 5)...', 'step')
     s.send('sc -M 5 > sc_out.txt')
@@ -1548,17 +1570,23 @@ def run_mlc(s: SVOSSession) -> str:
 def run_solar(s: SVOSSession) -> str:
     _status('Running Solar...', 'step')
     s.send(SOLAR_CMD)
+    solar_timeout = False
     try:
         _, buf = s.read_until_any([b'PASS', b'pass', b'FAIL', b'fail',
                                     SVOS_PROMPT], timeout=SOLAR_TIMEOUT)
         result = 'PASS' if (b'PASS' in buf or b'pass' in buf) else 'FAIL'
     except TimeoutError:
         result = 'FAIL'
+        solar_timeout = True
         _status('Solar: TIMEOUT', 'fail')
     try:
         s.read_until(SVOS_PROMPT, timeout=120)
     except TimeoutError:
-        pass
+        solar_timeout = True
+
+    if solar_timeout:
+        _recover_svos_prompt_after_timeout(s, 'Solar')
+
     _status(f'Solar: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'Solar {result} — press any key to continue...')
     return result
@@ -1567,13 +1595,18 @@ def run_solar(s: SVOSSession) -> str:
 def run_parser(s: SVOSSession):
     """Replicates parser() from the bash script: grep PASS/fail in all .txt files."""
     _status('Running parser (grep on *.txt)...', 'step')
-    s.send('grep -r "PASS" *.txt >> output.log 2>/dev/null; grep -r "success" *.txt >> output.log 2>/dev/null; grep -r "fail" *.txt >> output.log 2>/dev/null')
-    with _guard('parser grep'):
-        s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
-    s.send('mkdir -p output && mv output.log output/ 2>/dev/null; cat output/output.log')
-    with _guard('move output.log'):
-        s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
-    _status('Parser completed. Results in output/output.log', 'ok')
+    try:
+        s.send('grep -r "PASS" *.txt >> output.log 2>/dev/null; grep -r "success" *.txt >> output.log 2>/dev/null; grep -r "fail" *.txt >> output.log 2>/dev/null')
+        with _guard('parser grep'):
+            s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+        s.send('mkdir -p output && mv output.log output/ 2>/dev/null; cat output/output.log')
+        with _guard('move output.log'):
+            s.read_until(SVOS_PROMPT, timeout=CMD_TIMEOUT)
+        _status('Parser completed. Results in output/output.log', 'ok')
+    except FCOStepError as e:
+        if 'TIMEOUT waiting for:' in str(e):
+            _recover_svos_prompt_after_timeout(s, 'Parser')
+        raise
 
 
 def run_svos_boot_check(s: SVOSSession) -> str:
@@ -2533,6 +2566,8 @@ def _open_serial(com_port: str) -> 'SVOSSession':
         except Exception as e:
             _status(f'{name} FAILED: {e}', 'fail')
             logging.error(f'{name} failed for {qdf}: {e}', exc_info=True)
+            if isinstance(e, FCOStepError) and 'TIMEOUT waiting for:' in str(e):
+                _recover_svos_prompt_after_timeout(s, name)
             result = 'FAIL'
         if CRONOS_MODE and _tkey:
             _timings.setdefault(qdf, {})[_tkey] = time.time() - t0
@@ -2565,13 +2600,15 @@ def _open_serial(com_port: str) -> 'SVOSSession':
                            if _should_run(content, 'solar')    else 'SKIPPED')
 
     if _should_run(content, 'rocket'):
-        results['rocket_dram_dsa'] = _run_safe(
-            'Rocket DSA fallback',
-            run_rocket_dsa,
-            s,
-            results.get('rocket_dram_dsa', 'FAIL'),
-            _tkey='rocket_dsa'
-        )
+        dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
+        if dsa_fast != 'PASS':
+            results['rocket_dram_dsa'] = _run_safe(
+                'Rocket DSA fallback',
+                run_rocket_dsa,
+                s,
+                dsa_fast,
+                _tkey='rocket_dsa'
+            )
 
     try:
         run_parser(s)
@@ -2686,6 +2723,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 except Exception as e:
                     _status(f'{name} FAILED: {e}', 'fail')
                     logging.error(f'{name} failed for {qdf}: {e}', exc_info=True)
+                    if isinstance(e, FCOStepError) and 'TIMEOUT waiting for:' in str(e):
+                        _recover_svos_prompt_after_timeout(s, name)
                     result = 'FAIL'
                 if CRONOS_MODE and _tkey:
                     _timings.setdefault(qdf, {})[_tkey] = time.time() - t0
@@ -2734,14 +2773,16 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
             if _should_run(content, 'rocket'):
-                results['rocket_dram_dsa'] = _run_safe(
-                    'Rocket DSA fallback',
-                    run_rocket_dsa,
-                    s,
-                    results.get('rocket_dram_dsa', 'FAIL'),
-                    _tkey='rocket_dsa',
-                    _monitor_label=f'{qdf} - Rocket DSA fallback'
-                )
+                dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
+                if dsa_fast != 'PASS':
+                    results['rocket_dram_dsa'] = _run_safe(
+                        'Rocket DSA fallback',
+                        run_rocket_dsa,
+                        s,
+                        dsa_fast,
+                        _tkey='rocket_dsa',
+                        _monitor_label=f'{qdf} - Rocket DSA fallback'
+                    )
 
             if has_svos_tests:
                 try:
@@ -2882,6 +2923,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     except Exception as e:
                         _status(f'{name} FAILED: {e}', 'fail')
                         logging.error(f'[RETRY] {name} failed for {qdf}: {e}', exc_info=True)
+                        if isinstance(e, FCOStepError) and 'TIMEOUT waiting for:' in str(e):
+                            _recover_svos_prompt_after_timeout(s, f'{name} (retry)')
                         result = 'FAIL'
                     if CRONOS_MODE and _tkey:
                         _timings.setdefault(qdf, {})[_tkey] = time.time() - t0
@@ -2928,14 +2971,16 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     results['svos_boot'] = 'PASS' if has_svos_tests_r else 'SKIPPED'
 
                 if _should_run(content_r, 'rocket'):
-                    results['rocket_dram_dsa'] = _run_safe_r(
-                        'Rocket DSA fallback',
-                        run_rocket_dsa,
-                        s,
-                        results.get('rocket_dram_dsa', 'FAIL'),
-                        _tkey='rocket_dsa',
-                        _monitor_label=f'{qdf} - Retry Rocket DSA fallback'
-                    )
+                    dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
+                    if dsa_fast != 'PASS':
+                        results['rocket_dram_dsa'] = _run_safe_r(
+                            'Rocket DSA fallback',
+                            run_rocket_dsa,
+                            s,
+                            dsa_fast,
+                            _tkey='rocket_dsa',
+                            _monitor_label=f'{qdf} - Retry Rocket DSA fallback'
+                        )
                 else:
                     results['rocket_dram_dsa'] = 'SKIPPED'
 
@@ -3036,6 +3081,8 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         except Exception as e:
             _status(f'{name} FAILED: {e}', 'fail')
             logging.error(f'{name} failed for fused QDF {qdf}: {e}', exc_info=True)
+            if isinstance(e, FCOStepError) and 'TIMEOUT waiting for:' in str(e):
+                _recover_svos_prompt_after_timeout(s, name)
             result = 'FAIL'
         if CRONOS_MODE and _tkey:
             _timings.setdefault(qdf, {})[_tkey] = time.time() - t0
@@ -3082,14 +3129,16 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
     if _should_run(content, 'rocket'):
-        results['rocket_dram_dsa'] = _run_safe(
-            'Rocket DSA fallback',
-            run_rocket_dsa,
-            s,
-            results.get('rocket_dram_dsa', 'FAIL'),
-            _tkey='rocket_dsa',
-            _monitor_label=f'{qdf} - Rocket DSA fallback'
-        )
+        dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
+        if dsa_fast != 'PASS':
+            results['rocket_dram_dsa'] = _run_safe(
+                'Rocket DSA fallback',
+                run_rocket_dsa,
+                s,
+                dsa_fast,
+                _tkey='rocket_dsa',
+                _monitor_label=f'{qdf} - Rocket DSA fallback'
+            )
     else:
         results['rocket_dram_dsa'] = 'SKIPPED'
 
