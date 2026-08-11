@@ -1943,6 +1943,55 @@ def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_di
     return local_path
 
 
+def write_update_svos_report(com_port: str, ifwi: str, fused: bool, release_expected: str,
+                             patch_expected: str, release_detected: str, patch_detected: str,
+                             parsed: dict | None = None, status: str = 'PASS',
+                             overwrite_qdf: str | None = None, ult0: str = '', soc: str = 'x4',
+                             error: str = '', log_dir: Path = REPORTS_DIR):
+    """Writes a dedicated summary report for Tool 3 (Update SVOS)."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    parsed = parsed or {}
+
+    lines = [
+        'SVOS Update Summary',
+        '===================',
+        f'Date/Time        : {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        f'Status           : {status}',
+        f'COM              : {com_port}',
+        f'IFWI             : {ifwi}',
+        f'Fused            : {fused}',
+        f'Overwrite QDF    : {overwrite_qdf or "N/A"}',
+        f'ULT              : {ult0 or "N/A"}',
+        f'SOC              : {soc or "N/A"}',
+        f'Expected Release : {release_expected}',
+        f'Expected Patch   : {patch_expected}',
+        f'Detected Release : {release_detected}',
+        f'Detected Patch   : {patch_detected}',
+    ]
+
+    if parsed.get('build_date'):
+        lines.append(f'Build Date       : {parsed["build_date"]}')
+    if parsed.get('debian'):
+        lines.append(f'Debian           : {parsed["debian"]}')
+    if parsed.get('kernel'):
+        lines.append(f'Kernel           : {parsed["kernel"]}')
+    if parsed.get('bios'):
+        lines.append(f'BIOS             : {parsed["bios"]}')
+    if parsed.get('cpu_stepping'):
+        lines.append(f'CPU Stepping     : {parsed["cpu_stepping"]}')
+    if error:
+        lines.append(f'Error            : {error}')
+
+    content = '\n'.join(lines) + '\n'
+    latest_path = log_dir / 'update_svos_latest.txt'
+    archive_path = log_dir / f'UPDATE_SVOS_{ts}.txt'
+    latest_path.write_text(content, encoding='utf-8')
+    archive_path.write_text(content, encoding='utf-8')
+    logging.info(f'Update SVOS report saved: {latest_path}')
+    return latest_path, archive_path
+
+
 
 
 
@@ -3564,14 +3613,21 @@ def run_efi_timing(com_port: str):
         _pause('Ready to start EFI timing. Press any key...')
 
         t0_efi = time.time()
-        with _monitor_stage('EFI Timing - reboot to BIOS/EFI screen'):
-            _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
-            time.sleep(BIOS_REBOOT_WAIT)
-            s.flush()
+        s.begin_serial_capture('efi_timing_to_efi')
+        efi_timing_serial_log = None
+        try:
+            with _monitor_stage('EFI Timing - reboot to BIOS/EFI screen'):
+                _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+                time.sleep(BIOS_REBOOT_WAIT)
+                s.flush()
 
-            _status('Looking for BIOS/EFI gray screen (Boot Manager menu screen)...', 'wait')
-            _status("(Press 's' to skip BIOS wait and mark as timeout)", 'info')
-            _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused)
+                _status('Looking for BIOS/EFI gray screen (Boot Manager menu screen)...', 'wait')
+                _status("(Press 's' to skip BIOS wait and mark as timeout)", 'info')
+                _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused)
+        finally:
+            efi_timing_serial_log = s.end_serial_capture()
+            if efi_timing_serial_log:
+                _status(f'Serial EFI log saved: {efi_timing_serial_log}', 'info')
 
         efi_secs = time.time() - t0_efi
         total_secs = (overwrite_secs or 0.0) + efi_secs
@@ -3822,6 +3878,9 @@ def run_update_svos(com_port: str):
 
     _status(f'Abriendo {com_port}...', 'step')
     s = _open_serial(com_port)
+    parsed = {}
+    rel_ok = '?'
+    patch_ok = '?'
     try:
         total_steps = 5
         step = 1
@@ -3919,12 +3978,14 @@ def run_update_svos(com_port: str):
         print('=' * 60)
 
         # Validate that it matches the requested values
+        report_status = 'PASS'
         if rel_ok == release and patch_ok == patch:
             _status(f'Update SUCCESSFUL: {release} patch {patch}', 'ok')
             _alert_popup_async('Update SVOS OK',
                                f'SVOS updated successfully.\n'
                                f'Release: {release}\nPatch: {patch}')
         else:
+            report_status = 'VERIFY'
             _status(f'WARNING: release/patch do not match. '
                     f'Expected: {release}/{patch}  '
                     f'Detected: {rel_ok}/{patch_ok}', 'warn')
@@ -3933,7 +3994,39 @@ def run_update_svos(com_port: str):
                          f'Expected: {release} / {patch}\n'
                          f'Detected: {rel_ok} / {patch_ok}')
 
+        latest_report, archive_report = write_update_svos_report(
+            com_port=com_port,
+            ifwi=ifwi,
+            fused=fused,
+            overwrite_qdf=overwrite_qdf,
+            ult0=ult0,
+            soc=soc,
+            release_expected=release,
+            patch_expected=patch,
+            release_detected=rel_ok,
+            patch_detected=patch_ok,
+            parsed=parsed,
+            status=report_status,
+        )
+        _status(f'Update SVOS summary saved: {latest_report}', 'ok')
+        _status(f'Update SVOS archive saved: {archive_report.name}', 'info')
+
     except Exception as e:
+        write_update_svos_report(
+            com_port=com_port,
+            ifwi=ifwi,
+            fused=fused,
+            overwrite_qdf=overwrite_qdf,
+            ult0=ult0,
+            soc=soc,
+            release_expected=release,
+            patch_expected=patch,
+            release_detected=rel_ok,
+            patch_detected=patch_ok,
+            parsed=parsed,
+            status='FAIL',
+            error=str(e),
+        )
         _status(f'Error during SVOS update: {e}', 'fail')
         logging.error(f'Update SVOS failed: {e}', exc_info=True)
         _alert_popup('Update SVOS FAILED', str(e))
