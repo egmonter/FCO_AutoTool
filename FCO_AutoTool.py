@@ -356,6 +356,9 @@ _timings: dict = {}  # {qdf: {step: elapsed_seconds}}
 
 class _NullRuntimeMonitor:
     """No-op monitor used when popup UI is unavailable."""
+    def set_tool(self, _name: str):
+        return
+
     def start_stage(self, _name: str):
         return
 
@@ -370,6 +373,7 @@ class _PopupRuntimeMonitor:
         self._lock = threading.Lock()
         self._stages = []
         self._current_idx = None
+        self._tool_name = 'Waiting for tool...'
         self._last_render_text = ''
         self._ready = threading.Event()
         self._failed = threading.Event()
@@ -500,6 +504,8 @@ class _PopupRuntimeMonitor:
                             cur['status'] = 'DONE'
                     self._stages.append({'name': ev['name'], 'start': now, 'end': None, 'status': 'RUNNING'})
                     self._current_idx = len(self._stages) - 1
+                elif kind == 'tool':
+                    self._tool_name = ev.get('name') or 'Waiting for tool...'
                 elif kind == 'end' and self._current_idx is not None:
                     cur = self._stages[self._current_idx]
                     if cur['end'] is None:
@@ -514,6 +520,8 @@ class _PopupRuntimeMonitor:
         now = time.time()
         lines = []
         with self._lock:
+            lines.append(f'Tool: {self._tool_name}')
+            lines.append('')
             if not self._stages:
                 lines.append('Waiting for first stage...')
             else:
@@ -558,6 +566,11 @@ class _PopupRuntimeMonitor:
             return
         self._events.put({'kind': 'start', 'name': name})
 
+    def set_tool(self, name: str):
+        if self._failed.is_set() or (not self._ready.is_set()):
+            return
+        self._events.put({'kind': 'tool', 'name': name})
+
     def end_stage(self, status: str = 'DONE'):
         if self._failed.is_set() or (not self._ready.is_set()):
             return
@@ -579,6 +592,12 @@ def _get_runtime_monitor():
             _status('Runtime monitor popup started.', 'info')
             _RUNTIME_MONITOR = mon
     return _RUNTIME_MONITOR
+
+
+def _set_runtime_monitor_tool(tool_name: str):
+    """Sets the top-level tool label shown in the popup monitor."""
+    mon = _get_runtime_monitor()
+    mon.set_tool(tool_name)
 
 
 @contextlib.contextmanager
@@ -3482,6 +3501,7 @@ def run_efi_timing(com_port: str):
 
     ifwi = get_ifwi_version()
     _status(f'IFWI detected: {ifwi}', 'info')
+    _set_runtime_monitor_tool('EFI Timing')
 
     cfg_last = _load_json_file(LAST_EFI_TIMING_CONFIG_FILE)
     use_last = False
@@ -3633,6 +3653,7 @@ def run_boot_svos_only(com_port: str):
 
     ifwi = get_ifwi_version()
     _status(f'IFWI detected: {ifwi}', 'info')
+    _set_runtime_monitor_tool('Boot SVOS')
 
     cfg_last = _load_json_file(LAST_BOOT_SVOS_CONFIG_FILE)
     use_last = False
@@ -3720,6 +3741,7 @@ def run_update_svos(com_port: str):
 
     ifwi = get_ifwi_version()
     _status(f'IFWI detected: {ifwi}', 'info')
+    _set_runtime_monitor_tool('Update SVOS')
 
     cfg_last = _load_json_file(LAST_UPDATE_CONFIG_FILE)
     use_last = False
@@ -3807,8 +3829,7 @@ def run_update_svos(com_port: str):
         # 1. Boot SVOS
         _pause(f'Step {step}/{total_steps} — Boot SVOS. Press a key...')
         _status(f'Step {step}/{total_steps} — Boot SVOS...', 'step')
-        with _monitor_stage('Update SVOS - Boot SVOS'):
-            boot_svos(s, do_mountsv=False, fused_nudge=fused)
+        boot_svos(s, do_mountsv=False, fused_nudge=fused)
         _status('SVOS ready.', 'ok')
         step += 1
 
@@ -3936,6 +3957,7 @@ def run_boot_centos_direct(com_port: str):
 
     ifwi = get_ifwi_version()
     _status(f'IFWI detected: {ifwi}', 'info')
+    _set_runtime_monitor_tool('Boot CentOS')
 
     cfg_last = _load_json_file(LAST_BOOT_CENTOS_CONFIG_FILE)
     use_last = False
@@ -4090,6 +4112,8 @@ def main():
         print(f'\n  Mode: {mode} — {_MODE_DESC.get(mode, "")}')
     else:
         mode = _ask_mode()
+
+    _set_runtime_monitor_tool(f'FCO Automation - Mode {mode}')
 
     # ---- COM port and week ----
     if use_last:
