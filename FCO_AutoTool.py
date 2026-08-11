@@ -2313,11 +2313,15 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
 # ---------------------------------------------------------------------------
 
 def _should_run(content, test_name):
-    """Returns True if the test should run. content=None means full content.
-    svos_boot runs only when explicitly selected.
+    """Returns True if the test should run.
+
+    Semantics:
+    - content=None means full SVOS content (supercollider/rocket/memicals/solar/mlc)
+      without centos_boot and without svos_boot.
+    - svos_boot runs only when explicitly selected.
     """
-    if content is None and test_name == 'svos_boot':
-        return False
+    if content is None:
+        return test_name in ('supercollider', 'rocket', 'memicals', 'solar', 'mlc')
     return content is None or test_name in content
 
 
@@ -2333,15 +2337,19 @@ def _ask_content_config(qdf_list):
         ('supercollider', 'SuperCollider'),
         ('rocket',        'Rocket (cpu/iax/dsa)'),
         ('memicals',      'Memicals'),
-        ('mlc',           'MLC'),
         ('solar',         'Solar'),
+        ('mlc',           'MLC'),
     ]
+    _FULL_SVOS = [k for k, _ in _LABELS]
 
     print()
-    resp = input('Full content for ALL QDFs? (y/n): ').strip().lower()
+    resp = input('Full SVOS content for ALL QDFs? (y/n): ').strip().lower()
     if resp in ('s', 'y'):
+        run_centos_all = input('Run CentOS Boot Check for ALL QDFs? (y/n): ').strip().lower() in ('s', 'y')
         for item in qdf_list:
-            item['content'] = None
+            item['content'] = list(_FULL_SVOS)
+            if run_centos_all:
+                item['content'].append('centos_boot')
         print()
         return
 
@@ -2349,10 +2357,15 @@ def _ask_content_config(qdf_list):
     for item in qdf_list:
         qdf = item['qdf']
         print(f'  --- {qdf} ---')
-        resp_full = input(f'  Full content for {qdf}? (y/n): ').strip().lower()
+        resp_full = input(f'  Full SVOS content for {qdf}? (y/n): ').strip().lower()
         if resp_full in ('s', 'y'):
-            item['content'] = None
-            print(f'  {qdf}: Full content')
+            selected = list(_FULL_SVOS)
+            run_centos = input('    Run CentOS Boot Check? (y/n): ').strip().lower() in ('s', 'y')
+            if run_centos:
+                selected.append('centos_boot')
+            item['content'] = selected
+            selected_display = ', '.join(_CONTENT_DISPLAY.get(k, k) for k in selected)
+            print(f'  {qdf}: {selected_display}')
             print()
             continue
 

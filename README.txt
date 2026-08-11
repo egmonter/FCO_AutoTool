@@ -73,13 +73,16 @@ TOOL 1 (FCO Automation):
        - Extra args (optional, Python dict), e.g.: {'disable_axon': True}
 
   e) Content to run per QDF:
-       - Full content for all  → answer 'y'
+       - Full SVOS content for all  → answer 'y'
+         (this includes only SVOS tests: SuperCollider, Rocket, Memicals, Solar, MLC)
+       - Then it asks separately:
+           * Run CentOS Boot Check for ALL QDFs? (y/n)
        - Or configure per QDF (select at least one):
            * SuperCollider
            * Rocket (cpu/iax/dsa)
            * Memicals
-           * MLC
            * Solar
+           * MLC
            * CentOS Boot (optional: reboots system, boots via \\EFI\\centos\\grubx64.efi,
                           login root/root, runs ifconfig check)
        - If all SVOS content items are "no", it asks:
@@ -178,8 +181,8 @@ CentOS power cycle automatically. It does not run the overwrite.
                                     → Rocket DSA/VTD   (fast path: rocket --hw dram,dsa,vtd)
                                     → Rocket iax       (rocket --hw dram,iax + rtm)
                                     → Memicals         (memic.py -M 15)
-                                    → MLC              (mlc --loaded_latency -t60)
                                     → Solar            (/usr/bin/solar/solar.sh)
+                                    → MLC              (mlc --loaded_latency -t60)
                                     → Rocket DSA/VTD fallback (only if fast path was FAIL/UNKNOWN):
                                                         killmax→unmountsv→rmmodsvos2
                                                         →mountsv→retry rocket)
@@ -318,6 +321,12 @@ RESULTS AND LOGS
       - boot_svos() runs but skips setup_fco_dir (no directory/file setup)
       - All SVOS tests are marked SKIPPED (not executed)
       - System reboots directly to CentOS boot
+
+  - Timeout recovery behavior:
+      - If a test times out waiting for SVOS prompt, the tool now attempts
+        automatic shell recovery (Ctrl+C + ENTER) before continuing.
+      - This reduces cascaded false FAILs in later steps (Solar/parser/result write)
+        when the shell is stalled.
       - Overall result = PASS if CentOS boot successful, FAIL otherwise
 
   - KEYPRESS SKIP DURING TIMEOUT (Windows only):
