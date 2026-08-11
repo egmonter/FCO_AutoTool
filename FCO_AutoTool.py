@@ -135,6 +135,8 @@ BOOT_TIMEOUT     = 600   # boot until EFI shell (post-BIOS)       10 min
 BIOS_REBOOT_WAIT = 10    # minimum wait before looking for BIOS (flush buffer)
 BIOS_WAIT_TIMEOUT= 900   # BIOS screen timeout before retry    15 min
 BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
+EFI_SERIAL_TAIL_MAX = 20  # max seconds to keep reading serial after EFI/BIOs detect in Tool 5
+EFI_SERIAL_TAIL_IDLE = 2  # stop tail capture after this many idle seconds
 SVOS_TIMEOUT     = 600   # boot SVOS                               10 min
 CENTOS_BOOT_TIMEOUT = 600  # boot CentOS                           10 min
 MOUNTSV_TIMEOUT  = 1800  # mountsv                                 30 min
@@ -755,6 +757,22 @@ def _check_skip_key():
             return True
     
     return False
+
+
+def _capture_serial_tail(s, max_seconds: float = EFI_SERIAL_TAIL_MAX,
+                         idle_seconds: float = EFI_SERIAL_TAIL_IDLE):
+    """Reads trailing serial output for a short window to avoid truncating late lines."""
+    start = time.time()
+    last_data = time.time()
+    while (time.time() - start) < max_seconds:
+        chunk = s.ser.read(1024)
+        if chunk:
+            s._print(chunk)
+            last_data = time.time()
+            continue
+        if (time.time() - last_data) >= idle_seconds:
+            break
+        time.sleep(0.05)
 
 
 def _sanitize_log_token(value: str) -> str:
@@ -2836,14 +2854,14 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
         try:
             sv_started = SIGNAL_DIR / f'{qdf}_sv_started.signal'
             sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
+            sv_progress = SIGNAL_DIR / f'{qdf}_sv_progress.signal'
             _status(f'Waiting for SV to start/complete the fuse overwrite of {qdf}...', 'wait')
 
             first_signal = _wait_for_any_file([sv_started, sv_done], poll=1)
             if first_signal == sv_started:
                 _status(f'Overwrite of {qdf} started by sv_automation.', 'info')
                 t0_ow = time.time()
-                with _monitor_stage(f'{qdf} - Bootscript Excecution (Fuse Overwrite)'):
-                    _wait_for_file(sv_done, poll=1)
+                _wait_for_sv_done_with_progress(qdf, sv_done, sv_progress)
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['overwrite_wait'] = time.time() - t0_ow
             else:
@@ -3385,6 +3403,45 @@ def _ask_fused() -> bool:
         print('  [!!] Enter y or n.')
 
 
+def _wait_for_sv_done_with_progress(qdf: str, sv_done: Path, sv_progress: Path):
+    """Waits for sv_done and exposes overwrite sub-stages in the runtime monitor."""
+    marker_to_stage = {
+        'OVERWRITE_STARTED': f'{qdf} - Overwrite started',
+        'HOOK_CHECK': f'{qdf} - Overwrite hook check',
+        'HOOK_RECOVERY': f'{qdf} - Overwrite holdhook recovery',
+        'HOOK_POWER_CYCLE': f'{qdf} - Overwrite power cycle',
+        'HOOK_RESYNC': f'{qdf} - Overwrite ITP resync',
+        'WRAPPER_RUNNING': f'{qdf} - Overwrite bs_wrap execution',
+        'WRAPPER_DONE': f'{qdf} - Overwrite wrapper done',
+        'ERROR': f'{qdf} - Overwrite error',
+    }
+    mon = _get_runtime_monitor()
+    current_stage_open = False
+    last_marker = None
+
+    while not sv_done.exists():
+        marker = None
+        if sv_progress.exists():
+            try:
+                marker = sv_progress.read_text(encoding='utf-8').strip()
+            except Exception:
+                marker = None
+
+        if marker and marker != last_marker:
+            if current_stage_open:
+                mon.end_stage('DONE')
+                current_stage_open = False
+
+            mon.start_stage(marker_to_stage.get(marker, f'{qdf} - Overwrite: {marker}'))
+            current_stage_open = True
+            last_marker = marker
+
+        time.sleep(0.5)
+
+    if current_stage_open:
+        mon.end_stage('DONE')
+
+
 def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None,
                           monitor_label: str | None = None):
     """
@@ -3398,7 +3455,8 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None,
     SIGNAL_DIR.mkdir(parents=True, exist_ok=True)
 
     # Clean old signals
-    for name in [f'{qdf}_sv_started.signal', f'{qdf}_sv_done.signal', f'{qdf}_svos_done.signal']:
+    for name in [f'{qdf}_sv_started.signal', f'{qdf}_sv_done.signal', f'{qdf}_svos_done.signal',
+                 f'{qdf}_sv_progress.signal']:
         sig = SIGNAL_DIR / name
         if sig.exists():
             sig.unlink()
@@ -3421,13 +3479,13 @@ def _do_sv_overwrite_wait(qdf: str, ult0: str, soc: str = 'x4', kwargs=None,
     # Wait for either the new start signal or the legacy done signal directly.
     sv_started = SIGNAL_DIR / f'{qdf}_sv_started.signal'
     sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
+    sv_progress = SIGNAL_DIR / f'{qdf}_sv_progress.signal'
     first_signal = _wait_for_any_file([sv_started, sv_done], poll=1)
 
     if first_signal == sv_started:
         _status(f'Overwrite of {qdf} started by sv_automation.', 'info')
         if monitor_label:
-            with _monitor_stage(monitor_label):
-                _wait_for_file(sv_done, poll=1)
+            _wait_for_sv_done_with_progress(qdf, sv_done, sv_progress)
         else:
             _wait_for_file(sv_done, poll=1)
     else:
@@ -3623,6 +3681,8 @@ def run_efi_timing(com_port: str):
                 _status('Looking for BIOS/EFI gray screen (Boot Manager menu screen)...', 'wait')
                 _status("(Press 's' to skip BIOS wait and mark as timeout)", 'info')
                 _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused)
+                _status('BIOS/EFI detected. Capturing trailing serial output...', 'info')
+                _capture_serial_tail(s)
         finally:
             efi_timing_serial_log = s.end_serial_capture()
             if efi_timing_serial_log:

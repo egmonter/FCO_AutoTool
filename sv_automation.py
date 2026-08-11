@@ -64,6 +64,16 @@ _BOOT_FAIL_PATTERNS = [
 ]
 
 
+def _write_progress(progress_file: Path | None, marker: str):
+    """Writes a lightweight overwrite progress marker for FCO monitor consumption."""
+    if not progress_file:
+        return
+    try:
+        progress_file.write_text(f'{marker}\n', encoding='utf-8')
+    except Exception:
+        pass
+
+
 def _centos_requested(item: dict) -> bool:
     """
     Returns True only when the QDF explicitly includes CentOS boot support.
@@ -115,7 +125,7 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     # Clean up signals from previous runs to prevent SV from skipping the wait
     for item in qdf_list:
         qdf = item['qdf']
-        for name in [f'{qdf}_sv_done.signal', f'{qdf}_svos_done.signal']:
+        for name in [f'{qdf}_sv_done.signal', f'{qdf}_svos_done.signal', f'{qdf}_sv_progress.signal']:
             sig = sig_dir / name
             if sig.exists():
                 sig.unlink()
@@ -156,11 +166,14 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
         sv_started = sig_dir / f'{qdf}_sv_started.signal'
         sv_started.write_text('started\n')
         print(f"  Start signal written: {sv_started.name}")
+        sv_progress = sig_dir / f'{qdf}_sv_progress.signal'
+        _write_progress(sv_progress, 'OVERWRITE_STARTED')
 
         # Execute fuse overwrite
         try:
-            _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc, **item_kwargs)
+            _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc, progress_file=sv_progress, **item_kwargs)
         except Exception as e:
+            _write_progress(sv_progress, 'ERROR')
             print(f"\n  [!!] Error in fuse overwrite for {qdf}: {e}")
             if i < len(qdf_list) - 1:
                 resp = input(f"  Continue with next QDF? (y/n): ").strip().lower()
@@ -402,6 +415,32 @@ def run_mode2_centos_monitor(qdf=None, signal_dir=None):
 # ---------------------------------------------------------------------------
 
 def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
+    progress_file = kwargs.pop('progress_file', None)
+
+    _write_progress(progress_file, 'HOOK_CHECK')
+    print("  hook check (first action) ...")
+    hook_ok = True
+    try:
+        hook_ok = bool(itp.hookstatus(0, 3))
+        print(f"  hookstatus(0,3) [pre-unlock] -> {hook_ok}")
+    except Exception as e:
+        print(f"  [warn] Could not read hookstatus(0,3) [pre-unlock]: {e}. Continuing without pre-check guard.")
+
+    if hook_ok is False:
+        _write_progress(progress_file, 'HOOK_RECOVERY')
+        print("  [warn] hookstatus(0,3)=False [pre-unlock]. Running holdhook + power cycle recovery...")
+        try:
+            itp.holdhook(0, 3, 1)
+            print("  holdhook(0,3,1) executed.")
+        except Exception as e:
+            raise RuntimeError(f"holdhook(0,3,1) failed: {e}")
+
+        _write_progress(progress_file, 'HOOK_POWER_CYCLE')
+        _power_cycle_usb(context='hookstatus(0,3)=False pre-unlock')
+
+        _write_progress(progress_file, 'HOOK_RESYNC')
+        print("  Re-syncing ITP after pre-unlock power cycle...")
+
     print("  forcereconfig / unlock ...")
     itp.forcereconfig()
     itp.unlock()
@@ -409,6 +448,7 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     sv.refresh()
 
     # Guard against known overwrite failure mode when hookstatus(0,3) is OUT/False.
+    _write_progress(progress_file, 'HOOK_CHECK')
     hook_ok = True
     try:
         hook_ok = bool(itp.hookstatus(0, 3))
@@ -417,6 +457,7 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
         print(f"  [warn] Could not read hookstatus(0,3): {e}. Continuing without hook guard.")
 
     if hook_ok is False:
+        _write_progress(progress_file, 'HOOK_RECOVERY')
         print("  [warn] hookstatus(0,3)=False detected. Running holdhook + power cycle recovery...")
         try:
             itp.holdhook(0, 3, 1)
@@ -424,8 +465,10 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
         except Exception as e:
             raise RuntimeError(f"holdhook(0,3,1) failed: {e}")
 
+        _write_progress(progress_file, 'HOOK_POWER_CYCLE')
         _power_cycle_usb(context='hookstatus(0,3)=False pre-overwrite')
 
+        _write_progress(progress_file, 'HOOK_RESYNC')
         print("  Re-syncing ITP after power cycle...")
         itp.forcereconfig()
         itp.unlock()
@@ -466,6 +509,7 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     print(f"  bs_wrap.main({params_str})")
     print()
 
+    _write_progress(progress_file, 'WRAPPER_RUNNING')
     log_before = _get_latest_bootscript_log()
     capture = io.StringIO()
     with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
@@ -477,6 +521,8 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     log_after = _get_latest_bootscript_log()
     log_for_check = log_after or log_before
     _assert_bootscript_success(f'QDF={qdf}', wrapped_output, log_for_check)
+
+    _write_progress(progress_file, 'WRAPPER_DONE')
 
     print(f"  [OK] bs_wrap.main completed for {qdf}")
 
