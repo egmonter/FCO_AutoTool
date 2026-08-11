@@ -1045,7 +1045,6 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int | None, enable_nudge:
                 f'BIOS screen did not appear within {timeout}s ({timeout//60} min)')
 
         if enable_nudge:
-            _status('Static BIOS screen — sending DOWN arrow to refresh...', 'wait')
             s.send_key(nudge_key)
             time.sleep(0.3)
 
