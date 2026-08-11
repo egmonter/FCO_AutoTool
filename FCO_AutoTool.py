@@ -373,6 +373,7 @@ class _PopupRuntimeMonitor:
         self._ready = threading.Event()
         self._failed = threading.Event()
         self._pinned = False
+        self._allow_close = False
         self._thread = threading.Thread(target=self._ui_worker, daemon=True)
         self._thread.start()
 
@@ -387,6 +388,7 @@ class _PopupRuntimeMonitor:
             root = tk.Tk()
             root.title('FCO AutoTool - Runtime Monitor')
             root.geometry('560x320')
+            root.protocol('WM_DELETE_WINDOW', self._on_close_request)
             self._root = root
             self._set_topmost(True)
             root.after(3000, self._release_initial_topmost)
@@ -428,6 +430,16 @@ class _PopupRuntimeMonitor:
         except Exception:
             self._failed.set()
             self._ready.set()
+
+    def _on_close_request(self):
+        """Keeps monitor alive while the tool is still running."""
+        if self._allow_close:
+            try:
+                self._root.destroy()
+            except Exception:
+                pass
+            return
+        _status('Runtime monitor stays open until the tool closes (Ctrl+C or normal exit).', 'info')
 
     def _set_topmost(self, enabled: bool):
         if not hasattr(self, '_root'):
@@ -626,6 +638,15 @@ def _hold_open_on_error(title: str):
     print()
     while True:
         time.sleep(1)
+
+
+def _pause_before_close(title: str = 'FCO AUTOMATION'):
+    """Pauses before exit; if stdin is unavailable, keeps the window open."""
+    try:
+        input('\nPress ENTER to close...')
+    except (EOFError, OSError):
+        _status('No interactive stdin detected. Keeping window open (Ctrl+C to close)...', 'warn')
+        _hold_open_until_interrupt(title)
 
 
 def _strip_ansi(data: bytes) -> str:
@@ -3967,7 +3988,9 @@ def main():
         else:  # tool == 'efi_timing'
             run_efi_timing(com_port)
         if tool == 'update':
-            input('\nPress ENTER to close...')
+            _pause_before_close('UPDATE SVOS')
+        elif tool == 'efi_timing':
+            _pause_before_close('EFI TIMING')
         return
 
     # ---- From here: tool == 'fco' ----
@@ -4273,7 +4296,7 @@ def main():
             tag = '[FAIL]       '
         print(f"  {r['qdf']:<12} {ov:<20} {tag}")
     print('=' * 60)
-    input('\nPress ENTER to close...')
+    _pause_before_close('FCO AUTOMATION')
 
 
 if __name__ == '__main__':
@@ -4284,5 +4307,5 @@ if __name__ == '__main__':
         print(f'\n[!!] ERROR at startup: {e}')
         import traceback
         traceback.print_exc()
-        input('\nPress ENTER to close...')
+        _pause_before_close('FCO AUTOMATION STARTUP')
 
