@@ -17,6 +17,8 @@ import sys
 import ctypes
 import time
 import json
+import io
+import contextlib
 from pathlib import Path
 
 
@@ -53,6 +55,13 @@ def _load_fixed_params() -> dict:
                     fused_unit=False, pwrgooddelay=30)
 
 FIXED_PARAMS = _load_fixed_params()
+
+# Known bootscript failure signatures that may appear even when bs_wrap.main returns.
+_BOOT_FAIL_PATTERNS = [
+    'BOOTSCRIPT FAILED',
+    'LAST ERRORS AT:',
+    'FAIL ->',
+]
 
 
 def _centos_requested(item: dict) -> bool:
@@ -272,6 +281,44 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
         print("\n  [INFO] No QDFs for retry.")
 
 
+def _get_latest_bootscript_log() -> Path | None:
+    """Returns the newest bootscript log file if present."""
+    default_dir = Path(r'C:\pythonsv\diamondrapids\toolext\bootscript\logfiles')
+    if not default_dir.exists():
+        return None
+    logs = sorted(default_dir.glob('boot_*.log'), key=lambda p: p.stat().st_mtime, reverse=True)
+    return logs[0] if logs else None
+
+
+def _bootscript_text_has_failure(text: str) -> bool:
+    if not text:
+        return False
+    upper_text = text.upper()
+    return any(pat.upper() in upper_text for pat in _BOOT_FAIL_PATTERNS)
+
+
+def _assert_bootscript_success(context: str, captured_text: str, log_path: Path | None):
+    """Raises RuntimeError when known bootscript failure signatures are detected."""
+    if _bootscript_text_has_failure(captured_text):
+        raise RuntimeError(
+            f'{context}: bootscript failure signature detected in wrapper output '
+            f'({_BOOT_FAIL_PATTERNS}).'
+        )
+
+    if log_path and log_path.exists():
+        try:
+            text = log_path.read_text(encoding='utf-8', errors='ignore')
+            if _bootscript_text_has_failure(text):
+                raise RuntimeError(
+                    f'{context}: bootscript failure signature detected in log '
+                    f'{log_path} ({_BOOT_FAIL_PATTERNS}).'
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            print(f'  [warn] Could not parse bootscript log {log_path}: {e}')
+
+
 def run_mode2_centos_monitor(qdf=None, signal_dir=None):
     """
     Mode 2 helper: waits for {qdf}_svos_done.signal, then handles one CentOS
@@ -419,7 +466,18 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     print(f"  bs_wrap.main({params_str})")
     print()
 
-    bs_wrap.main(**all_params)
+    log_before = _get_latest_bootscript_log()
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+        bs_wrap.main(**all_params)
+    wrapped_output = capture.getvalue()
+    if wrapped_output:
+        print(wrapped_output, end='')
+
+    log_after = _get_latest_bootscript_log()
+    log_for_check = log_after or log_before
+    _assert_bootscript_success(f'QDF={qdf}', wrapped_output, log_for_check)
+
     print(f"  [OK] bs_wrap.main completed for {qdf}")
 
 
@@ -489,7 +547,18 @@ def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
                 print(f"  [CentOS-Wrapper] Executing wrapper for {qdf_w}...")
                 params_str = ', '.join(f"{k}={v!r}" for k, v in all_params_w.items())
                 print(f"  [CentOS-Wrapper] bs_wrap.main({params_str})")
-                bs_wrap.main(**all_params_w)
+                log_before = _get_latest_bootscript_log()
+                capture = io.StringIO()
+                with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+                    bs_wrap.main(**all_params_w)
+                wrapped_output = capture.getvalue()
+                if wrapped_output:
+                    print(wrapped_output, end='')
+
+                log_after = _get_latest_bootscript_log()
+                log_for_check = log_after or log_before
+                _assert_bootscript_success(f'CentOS wrapper QDF={qdf_w}', wrapped_output, log_for_check)
+
                 (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('done\n')
                 wrapper_sig.unlink(missing_ok=True)
                 print(f"  [CentOS-Wrapper] Wrapper execution completed. Signal written: {qdf_str}_centos_wrapper_done.signal")
