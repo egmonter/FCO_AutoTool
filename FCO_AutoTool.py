@@ -1268,7 +1268,8 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         _status('ATTENTION message detected. Sending ENTER...', 'step')
         s.send_enter()
 
-        with _monitor_stage('Boot to SVOS'):
+        boot_stage_name = 'Boot to SVOS (login -> mountsv)' if do_mountsv else 'Boot to SVOS (login)'
+        with _monitor_stage(boot_stage_name):
             # 7. Wait for the first root@... prompt (temporary post-ATTENTION shell)
             _status('Loading SVOS...', 'wait')
             with _guard('shell SVOS post-boot (root@... prompt)'):
@@ -1298,25 +1299,24 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             with _guard('successful login - verify user/password (root/svos)'):
                 s.read_until(SVOS_PROMPT, timeout=30)
             _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
+
+            if not do_mountsv:
+                return
+
+            _pause('Login OK — validate in Raritan and press any key to run mountsv...')
+
+            # 10. Run mountsv and wait for the prompt to return
+            _status('Running mountsv...', 'step')
+            s.send('mountsv')
+            try:
+                s.read_until(SVOS_PROMPT, timeout=MOUNTSV_TIMEOUT)
+            except TimeoutError:
+                raise MountsvTimeoutError(f'mountsv did not respond within {MOUNTSV_TIMEOUT//60} min')
+            _status('mountsv completed. SVOS mounted successfully.', 'ok')
     finally:
         efi_to_svos_log = s.end_serial_capture()
         if efi_to_svos_log:
             _status(f'Serial OS log saved: {efi_to_svos_log}', 'info')
-
-    if not do_mountsv:
-        return
-
-    _pause('Login OK — validate in Raritan and press any key to run mountsv...')
-
-    with _monitor_stage('Mount SVOS'):
-        # 10. Run mountsv and wait for the prompt to return
-        _status('Running mountsv...', 'step')
-        s.send('mountsv')
-        try:
-            s.read_until(SVOS_PROMPT, timeout=MOUNTSV_TIMEOUT)
-        except TimeoutError:
-            raise MountsvTimeoutError(f'mountsv did not respond within {MOUNTSV_TIMEOUT//60} min')
-        _status('mountsv completed. SVOS mounted successfully.', 'ok')
 
 
 def boot_centos_direct(s: SVOSSession):
@@ -2854,14 +2854,14 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
         try:
             sv_started = SIGNAL_DIR / f'{qdf}_sv_started.signal'
             sv_done = SIGNAL_DIR / f'{qdf}_sv_done.signal'
-            sv_progress = SIGNAL_DIR / f'{qdf}_sv_progress.signal'
             _status(f'Waiting for SV to start/complete the fuse overwrite of {qdf}...', 'wait')
 
             first_signal = _wait_for_any_file([sv_started, sv_done], poll=1)
             if first_signal == sv_started:
                 _status(f'Overwrite of {qdf} started by sv_automation.', 'info')
                 t0_ow = time.time()
-                _wait_for_sv_done_with_progress(qdf, sv_done, sv_progress)
+                with _monitor_stage(f'{qdf} - Bootscript Excecution (Fuse Overwrite)'):
+                    _wait_for_file(sv_done, poll=1)
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['overwrite_wait'] = time.time() - t0_ow
             else:
@@ -3045,27 +3045,6 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                                  'content': item.get('content'),
                                  'reason': reason})
 
-        except FCOStepError as e:
-            msg = str(e)
-            if 'sv_automation reported an error during overwrite' in msg:
-                reason = 'OverwriteError'
-                _status(f'QDF {qdf}: overwrite failed — will be retried after power cycle', 'fail')
-                logging.error(f'{reason} in QDF {qdf}: {e}')
-                _alert_popup_async(f'{reason} — {qdf}',
-                                   f'Bootscript overwrite failed. It will be retried at the end.\n{e}')
-                all_results.append({'qdf': qdf, 'overall': reason, 'log': msg})
-                retry_needed.append({'qdf': qdf, 'ult0': ult0,
-                                     'soc': item.get('soc', 'x4'),
-                                     'kwargs': item.get('kwargs'),
-                                     'content': item.get('content'),
-                                     'reason': reason})
-            else:
-                _status(f'ERROR in QDF {qdf}: {e}', 'fail')
-                logging.error(f'FCOStepError in QDF {qdf}: {e}', exc_info=True)
-                _alert_popup_async(f'ERROR in QDF {qdf}', msg)
-                all_results.append({'qdf': qdf, 'overall': 'ERROR', 'log': msg})
-                _status('Continuing with the next QDF...', 'step')
-
         except Exception as e:
             _status(f'ERROR in QDF {qdf}: {e}', 'fail')
             logging.error(f'Unexpected error in QDF {qdf}: {e}', exc_info=True)
@@ -3112,10 +3091,6 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             try:
                 with _monitor_stage(f'{qdf} - Retry Bootscript Excecution (Fuse Overwrite)'):
                     wait_for_signal(SIGNAL_DIR / f'{qdf}_retry_sv_done.signal')
-                retry_sv_done = SIGNAL_DIR / f'{qdf}_retry_sv_done.signal'
-                retry_content = retry_sv_done.read_text(encoding='utf-8').strip().lower() if retry_sv_done.exists() else ''
-                if retry_content == 'error':
-                    raise FCOStepError(f'sv_automation reported an error during retry overwrite of {qdf}.')
                 _status(f'Retry overwrite of {qdf} completed.', 'ok')
 
                 content_r = retry_item.get('content')
@@ -3432,17 +3407,18 @@ def _wait_for_sv_done_with_progress(qdf: str, sv_done: Path, sv_progress: Path):
     """Waits for sv_done and exposes overwrite sub-stages in the runtime monitor."""
     marker_to_stage = {
         'OVERWRITE_STARTED': f'{qdf} - Overwrite started',
-        'HOOK_CHECK': f'{qdf} - Overwrite hook check',
-        'HOOK_RECOVERY': f'{qdf} - Overwrite holdhook recovery',
-        'HOOK_POWER_CYCLE': f'{qdf} - Overwrite power cycle',
-        'HOOK_RESYNC': f'{qdf} - Overwrite ITP resync',
-        'WRAPPER_RUNNING': f'{qdf} - Overwrite bs_wrap execution',
-        'WRAPPER_DONE': f'{qdf} - Overwrite wrapper done',
+        'HOOK_CHECK': f'{qdf} - Hook status check',
+        'HOOK_RECOVERY': f'{qdf} - Power cycle due to hook status',
+        'HOOK_POWER_CYCLE': f'{qdf} - Power cycle due to hook status',
+        'HOOK_RESYNC': f'{qdf} - ITP resync after hook power cycle',
+        'WRAPPER_RUNNING': f'{qdf} - bs_wrap execution',
+        'WRAPPER_DONE': f'{qdf} - Wrapper done',
         'ERROR': f'{qdf} - Overwrite error',
     }
     mon = _get_runtime_monitor()
     current_stage_open = False
     last_marker = None
+    current_stage_name = None
 
     while not sv_done.exists():
         marker = None
@@ -3453,12 +3429,17 @@ def _wait_for_sv_done_with_progress(qdf: str, sv_done: Path, sv_progress: Path):
                 marker = None
 
         if marker and marker != last_marker:
-            if current_stage_open:
+            next_stage_name = marker_to_stage.get(marker, f'{qdf} - Overwrite: {marker}')
+
+            if current_stage_open and next_stage_name != current_stage_name:
                 mon.end_stage('DONE')
                 current_stage_open = False
 
-            mon.start_stage(marker_to_stage.get(marker, f'{qdf} - Overwrite: {marker}'))
-            current_stage_open = True
+            if not current_stage_open:
+                mon.start_stage(next_stage_name)
+                current_stage_open = True
+                current_stage_name = next_stage_name
+
             last_marker = marker
 
         time.sleep(0.5)
