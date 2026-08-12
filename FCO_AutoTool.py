@@ -1209,67 +1209,67 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         if boot_to_efi_log:
             _status(f'Serial boot log saved: {boot_to_efi_log}', 'info')
 
-    # 5. Look for SVOS grub on FS0, FS1, FS2
+    # 5. Look for SVOS grub on FS0, FS1, FS2 and continue through mountsv.
     s.begin_serial_capture('efi_to_svos')
     efi_to_svos_log = None
-    booted = False
-    try:
-        for fs in ('FS0', 'FS1', 'FS2'):
-            _status(f'Trying {fs}: ...', 'step')
-            s.flush()
-            s.send(f'{fs}:')
-            try:
-                s.read_until(f'{fs}:\\', timeout=15)
-            except TimeoutError:
-                _status(f'{fs}: not available, trying next...', 'info')
-                continue
+    boot_stage_name = 'Boot to SVOS (grubx64 -> mountsv)' if do_mountsv else 'Boot to SVOS (grubx64 -> login)'
+    with _monitor_stage(boot_stage_name):
+        booted = False
+        try:
+            for fs in ('FS0', 'FS1', 'FS2'):
+                _status(f'Trying {fs}: ...', 'step')
+                s.flush()
+                s.send(f'{fs}:')
+                try:
+                    s.read_until(f'{fs}:\\', timeout=15)
+                except TimeoutError:
+                    _status(f'{fs}: not available, trying next...', 'info')
+                    continue
 
-            _status(f'Launching {SVOS_GRUB_PATH} from {fs}: ...', 'step')
-            s.send_slow(SVOS_GRUB_PATH, char_delay=0.05)
+                _status(f'Launching {SVOS_GRUB_PATH} from {fs}: ...', 'step')
+                s.send_slow(SVOS_GRUB_PATH, char_delay=0.05)
 
-            # If the file does NOT exist: the EFI shell returns the prompt in < 5s
-            # If the file DOES exist: there is no response for several seconds while it loads
-            # -> Wait 10s for the shell prompt; if it does not return = it is loading
-            ATTENTION  = b'Press <ENTER> within 10 seconds to drop to a login shell'
-            EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
-            try:
-                matched, _ = _read_until_any_with_periodic_enter(
-                    s,
-                    [ATTENTION] + EFI_PROMPT,
-                    timeout=10,
-                    enter_every=5,
-                    tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
-                )
-                if matched == ATTENTION:
+                # If the file does NOT exist: the EFI shell returns the prompt in < 5s
+                # If the file DOES exist: there is no response for several seconds while it loads
+                # -> Wait 10s for the shell prompt; if it does not return = it is loading
+                ATTENTION  = b'Press <ENTER> within 10 seconds to drop to a login shell'
+                EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
+                try:
+                    matched, _ = _read_until_any_with_periodic_enter(
+                        s,
+                        [ATTENTION] + EFI_PROMPT,
+                        timeout=10,
+                        enter_every=5,
+                        tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
+                    )
+                    if matched == ATTENTION:
+                        booted = True
+                        break
+                    else:
+                        # The shell returned the prompt = file not found
+                        _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
+                        continue
+                except TimeoutError:
+                    # No prompt within 10s = the file loaded and is booting, wait without limit
+                    _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
+                    _read_until_any_with_periodic_enter(
+                        s,
+                        [ATTENTION],
+                        timeout=None,
+                        enter_every=5,
+                        tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
+                    )
                     booted = True
                     break
-                else:
-                    # The shell returned the prompt = file not found
-                    _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
-                    continue
-            except TimeoutError:
-                # No prompt within 10s = the file loaded and is booting, wait without limit
-                _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
-                _read_until_any_with_periodic_enter(
-                    s,
-                    [ATTENTION],
-                    timeout=None,
-                    enter_every=5,
-                    tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
-                )
-                booted = True
-                break
 
-        if not booted:
-            raise FCOStepError(
-                f'No se encontro {SVOS_GRUB_PATH} en FS0:, FS1: ni FS2:. '
-                'Verifica que el filesystem este disponible.')
+            if not booted:
+                raise FCOStepError(
+                    f'No se encontro {SVOS_GRUB_PATH} en FS0:, FS1: ni FS2:. '
+                    'Verifica que el filesystem este disponible.')
 
-        _status('ATTENTION message detected. Sending ENTER...', 'step')
-        s.send_enter()
+            _status('ATTENTION message detected. Sending ENTER...', 'step')
+            s.send_enter()
 
-        boot_stage_name = 'Boot to SVOS (login -> mountsv)' if do_mountsv else 'Boot to SVOS (login)'
-        with _monitor_stage(boot_stage_name):
             # 7. Wait for the first root@... prompt (temporary post-ATTENTION shell)
             _status('Loading SVOS...', 'wait')
             with _guard('shell SVOS post-boot (root@... prompt)'):
@@ -1313,10 +1313,10 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             except TimeoutError:
                 raise MountsvTimeoutError(f'mountsv did not respond within {MOUNTSV_TIMEOUT//60} min')
             _status('mountsv completed. SVOS mounted successfully.', 'ok')
-    finally:
-        efi_to_svos_log = s.end_serial_capture()
-        if efi_to_svos_log:
-            _status(f'Serial OS log saved: {efi_to_svos_log}', 'info')
+        finally:
+            efi_to_svos_log = s.end_serial_capture()
+            if efi_to_svos_log:
+                _status(f'Serial OS log saved: {efi_to_svos_log}', 'info')
 
 
 def boot_centos_direct(s: SVOSSession):
