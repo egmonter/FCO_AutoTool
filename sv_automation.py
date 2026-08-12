@@ -132,8 +132,20 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     sig_dir.mkdir(parents=True, exist_ok=True)
 
     if qdf_list is None:
+        print(f"  Loading qdf_list from: {QDF_LIST_FILE}")
         with open(QDF_LIST_FILE) as f:
             qdf_list = json.load(f)
+    else:
+        print('  Using qdf_list provided by caller (not reading qdf_list.json).')
+
+    if not isinstance(qdf_list, list) or not qdf_list:
+        raise ValueError(f'qdf_list is empty/invalid. Source: {QDF_LIST_FILE}')
+
+    try:
+        qdf_names = [str(item.get('qdf', '')) for item in qdf_list if isinstance(item, dict)]
+        print(f"  QDF queue loaded ({len(qdf_names)}): {qdf_names}")
+    except Exception:
+        pass
 
     print(f"\n{'='*60}")
     print(f"  FCO Automation: {len(qdf_list)} QDF(s) in queue")
