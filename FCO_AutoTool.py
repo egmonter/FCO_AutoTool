@@ -3045,6 +3045,27 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                                  'content': item.get('content'),
                                  'reason': reason})
 
+        except FCOStepError as e:
+            msg = str(e)
+            if 'sv_automation reported an error during overwrite' in msg:
+                reason = 'OverwriteError'
+                _status(f'QDF {qdf}: overwrite failed — will be retried after power cycle', 'fail')
+                logging.error(f'{reason} in QDF {qdf}: {e}')
+                _alert_popup_async(f'{reason} — {qdf}',
+                                   f'Bootscript overwrite failed. It will be retried at the end.\n{e}')
+                all_results.append({'qdf': qdf, 'overall': reason, 'log': msg})
+                retry_needed.append({'qdf': qdf, 'ult0': ult0,
+                                     'soc': item.get('soc', 'x4'),
+                                     'kwargs': item.get('kwargs'),
+                                     'content': item.get('content'),
+                                     'reason': reason})
+            else:
+                _status(f'ERROR in QDF {qdf}: {e}', 'fail')
+                logging.error(f'FCOStepError in QDF {qdf}: {e}', exc_info=True)
+                _alert_popup_async(f'ERROR in QDF {qdf}', msg)
+                all_results.append({'qdf': qdf, 'overall': 'ERROR', 'log': msg})
+                _status('Continuing with the next QDF...', 'step')
+
         except Exception as e:
             _status(f'ERROR in QDF {qdf}: {e}', 'fail')
             logging.error(f'Unexpected error in QDF {qdf}: {e}', exc_info=True)
@@ -3091,6 +3112,10 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             try:
                 with _monitor_stage(f'{qdf} - Retry Bootscript Excecution (Fuse Overwrite)'):
                     wait_for_signal(SIGNAL_DIR / f'{qdf}_retry_sv_done.signal')
+                retry_sv_done = SIGNAL_DIR / f'{qdf}_retry_sv_done.signal'
+                retry_content = retry_sv_done.read_text(encoding='utf-8').strip().lower() if retry_sv_done.exists() else ''
+                if retry_content == 'error':
+                    raise FCOStepError(f'sv_automation reported an error during retry overwrite of {qdf}.')
                 _status(f'Retry overwrite of {qdf} completed.', 'ok')
 
                 content_r = retry_item.get('content')

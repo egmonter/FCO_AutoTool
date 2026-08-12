@@ -18,6 +18,7 @@ import ctypes
 import time
 import json
 import io
+import re
 import contextlib
 from pathlib import Path
 
@@ -61,6 +62,7 @@ _BOOT_FAIL_PATTERNS = [
     'BOOTSCRIPT FAILED',
     'LAST ERRORS AT:',
     'FAIL ->',
+    'BREAK_REACHED',
 ]
 
 
@@ -175,15 +177,15 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
         except Exception as e:
             _write_progress(sv_progress, 'ERROR')
             print(f"\n  [!!] Error in fuse overwrite for {qdf}: {e}")
+            # Always write sv_done=error so SVOS never advances as success.
+            sv_done = sig_dir / f'{qdf}_sv_done.signal'
+            sv_done.write_text('error\n')
+            print(f"  Error signal written: {sv_done.name}")
             if i < len(qdf_list) - 1:
                 resp = input(f"  Continue with next QDF? (y/n): ").strip().lower()
                 if resp not in ('s', 'y', 'yes'):
                     print("  Process aborted by the user.")
                     return
-                # Write sv_done signal anyway so SVOS does not remain blocked
-                sv_done = sig_dir / f'{qdf}_sv_done.signal'
-                sv_done.write_text('error\n')
-                print(f"  Error signal written: {sv_done.name}")
                 continue
             else:
                 return
@@ -310,6 +312,46 @@ def _bootscript_text_has_failure(text: str) -> bool:
     return any(pat.upper() in upper_text for pat in _BOOT_FAIL_PATTERNS)
 
 
+def _extract_log_path_from_text(text: str) -> Path | None:
+    """Extracts "Logfile is at <path>" from wrapper output when present."""
+    if not text:
+        return None
+    m = re.search(r'Logfile is at\s+([^\r\n]+)', text, flags=re.IGNORECASE)
+    if not m:
+        return None
+    raw = m.group(1).strip().strip('"').strip("'")
+    try:
+        return Path(raw)
+    except Exception:
+        return None
+
+
+def _scan_recent_bootscript_logs(base_log: Path | None, seconds_window: int = 180) -> list[Path]:
+    """Returns recent bootscript logs near the current execution window."""
+    default_dir = Path(r'C:\pythonsv\diamondrapids\toolext\bootscript\logfiles')
+    if not default_dir.exists():
+        return []
+
+    now = time.time()
+    min_mtime = now - seconds_window
+    if base_log and base_log.exists():
+        try:
+            min_mtime = min(min_mtime, base_log.stat().st_mtime - 1)
+        except Exception:
+            pass
+
+    out = []
+    for p in sorted(default_dir.glob('boot_*.log'), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            if p.stat().st_mtime >= min_mtime:
+                out.append(p)
+        except Exception:
+            continue
+        if len(out) >= 5:
+            break
+    return out
+
+
 def _assert_bootscript_success(context: str, captured_text: str, log_path: Path | None):
     """Raises RuntimeError when known bootscript failure signatures are detected."""
     if _bootscript_text_has_failure(captured_text):
@@ -318,18 +360,30 @@ def _assert_bootscript_success(context: str, captured_text: str, log_path: Path 
             f'({_BOOT_FAIL_PATTERNS}).'
         )
 
-    if log_path and log_path.exists():
+    candidate_logs = []
+    explicit_log = _extract_log_path_from_text(captured_text)
+    if explicit_log:
+        candidate_logs.append(explicit_log)
+    if log_path:
+        candidate_logs.append(log_path)
+    for recent in _scan_recent_bootscript_logs(log_path):
+        if recent not in candidate_logs:
+            candidate_logs.append(recent)
+
+    for lp in candidate_logs:
+        if not lp or not lp.exists():
+            continue
         try:
-            text = log_path.read_text(encoding='utf-8', errors='ignore')
+            text = lp.read_text(encoding='utf-8', errors='ignore')
             if _bootscript_text_has_failure(text):
                 raise RuntimeError(
                     f'{context}: bootscript failure signature detected in log '
-                    f'{log_path} ({_BOOT_FAIL_PATTERNS}).'
+                    f'{lp} ({_BOOT_FAIL_PATTERNS}).'
                 )
         except RuntimeError:
             raise
         except Exception as e:
-            print(f'  [warn] Could not parse bootscript log {log_path}: {e}')
+            print(f'  [warn] Could not parse bootscript log {lp}: {e}')
 
 
 def run_mode2_centos_monitor(qdf=None, signal_dir=None):
@@ -416,7 +470,6 @@ def run_mode2_centos_monitor(qdf=None, signal_dir=None):
 
 def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     progress_file = kwargs.pop('progress_file', None)
-
     _write_progress(progress_file, 'HOOK_CHECK')
     print("  hook check (first action) ...")
     hook_ok = True
