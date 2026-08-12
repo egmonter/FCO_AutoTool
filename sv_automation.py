@@ -76,6 +76,28 @@ def _write_progress(progress_file: Path | None, marker: str):
         pass
 
 
+class _TeeCapture:
+    """Mirrors writes to console while capturing text for post-run checks."""
+    def __init__(self, live_stream, capture_stream):
+        self.live_stream = live_stream
+        self.capture_stream = capture_stream
+
+    def write(self, data):
+        self.live_stream.write(data)
+        self.capture_stream.write(data)
+        return len(data)
+
+    def flush(self):
+        self.live_stream.flush()
+        self.capture_stream.flush()
+
+    def isatty(self):
+        try:
+            return self.live_stream.isatty()
+        except Exception:
+            return False
+
+
 def _centos_requested(item: dict) -> bool:
     """
     Returns True only when the QDF explicitly includes CentOS boot support.
@@ -565,7 +587,9 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     _write_progress(progress_file, 'WRAPPER_RUNNING')
     log_before = _get_latest_bootscript_log()
     capture = io.StringIO()
-    with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+    tee_out = _TeeCapture(sys.stdout, capture)
+    tee_err = _TeeCapture(sys.stderr, capture)
+    with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
         bs_wrap.main(**all_params)
     wrapped_output = capture.getvalue()
     if wrapped_output:
@@ -648,7 +672,9 @@ def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
                 print(f"  [CentOS-Wrapper] bs_wrap.main({params_str})")
                 log_before = _get_latest_bootscript_log()
                 capture = io.StringIO()
-                with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
+                tee_out = _TeeCapture(sys.stdout, capture)
+                tee_err = _TeeCapture(sys.stderr, capture)
+                with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
                     bs_wrap.main(**all_params_w)
                 wrapped_output = capture.getvalue()
                 if wrapped_output:
