@@ -2417,8 +2417,9 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             
             # Wait for power cycle completion
             power_cycled_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycled.signal'
-            _status(f'Waiting for pysv power cycle completion...', 'wait')
-            _wait_for_file(power_cycled_signal)
+            with _monitor_stage(f'{qdf} - CentOS power cycle request'):
+                _status(f'Waiting for pysv power cycle completion...', 'wait')
+                _wait_for_file(power_cycled_signal)
             
             done_content = power_cycled_signal.read_text().strip()
             if done_content == 'error':
@@ -2439,8 +2440,9 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             
             # Wait for wrapper completion
             wrapper_done_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper_done.signal'
-            _status(f'Waiting for pysv wrapper execution...', 'wait')
-            _wait_for_file(wrapper_done_signal)
+            with _monitor_stage(f'{qdf} - CentOS wrapper execution'):
+                _status(f'Waiting for pysv wrapper execution...', 'wait')
+                _wait_for_file(wrapper_done_signal)
             
             done_content = wrapper_done_signal.read_text().strip()
             if done_content == 'error':
@@ -2450,7 +2452,8 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             _status('Wrapper execution completed by pysv.', 'ok')
         
         # Boot CentOS
-        boot_centos(s, fused_nudge=(mode in (2, 3, 4)))
+        with _monitor_stage(f'{qdf} - Boot CentOS'):
+            boot_centos(s, fused_nudge=(mode in (2, 3, 4)))
         _status('CentOS boot successful.', 'ok')
         _pause('CentOS boot OK — validate and press any key to continue...')
         return 'PASS'
@@ -2991,9 +2994,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
             if _should_run(content, 'centos_boot'):
                 t0_centos = time.time()
-                with _monitor_stage(f'{qdf} - Boot CentOS'):
-                    centos_result = run_centos_boot(s, mode, qdf, ult0, item.get('soc', 'x4'),
-                                                    item.get('kwargs'), is_retry=False)
+                centos_result = run_centos_boot(s, mode, qdf, ult0, item.get('soc', 'x4'),
+                                                item.get('kwargs'), is_retry=False)
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
                 results['centos_boot'] = centos_result
@@ -3356,9 +3358,8 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
             _status(f'Mode 2: signal written for pysv monitor: {svos_done_signal.name}', 'info')
         t0_centos = time.time()
         # centos_only=True means skip pysv entirely and do a soft reboot from SVOS.
-        with _monitor_stage(f'{qdf} - Boot CentOS'):
-            centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False,
-                                            centos_only=(mode == 2 and not needs_svos))
+        centos_result = run_centos_boot(s, mode, qdf, ult0, soc, kwargs, is_retry=False,
+                                        centos_only=(mode == 2 and not needs_svos))
         if CRONOS_MODE:
             _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
         results['centos_boot'] = centos_result
