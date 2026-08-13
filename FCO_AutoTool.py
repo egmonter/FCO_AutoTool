@@ -271,6 +271,23 @@ _CONTENT_DISPLAY = {
     'centos_boot':   'CentOS Boot (root/root + ifconfig)',
 }
 
+_CONTENT_SUMMARY_DISPLAY = {
+    'supercollider': 'SuperCollider',
+    'rocket':        'Rocket',
+    'memicals':      'Memicals',
+    'mlc':           'MLC',
+    'solar':         'Solar',
+    'svos_boot':     'SVOS Boot',
+    'centos_boot':   'CentOS Boot',
+}
+
+
+def _format_content_summary(content) -> str:
+    """Returns a short human-readable summary of selected content."""
+    if content is None:
+        return 'Full content'
+    return ', '.join(_CONTENT_SUMMARY_DISPLAY.get(k, k) for k in content)
+
 # Display commands for the result log (without file redirection)
 CONTENT_CMDS = {
     'supercollider':   'sc -M 5',
@@ -2852,10 +2869,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
         ult0 = item['ult0']
         soc = item.get('soc', 'x4')
         content = item.get('content')
-        if content is None:
-            selected_content = 'Full content'
-        else:
-            selected_content = ', '.join(_CONTENT_DISPLAY.get(k, k) for k in content)
+        selected_content = _format_content_summary(content)
         kwargs_str = f" | kwargs: {item.get('kwargs')}" if item.get('kwargs') else ''
 
         print(f'\n{"="*60}')
@@ -3246,27 +3260,21 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
     return all_results
 
 
-def _log_qdf_queue_summary(qdf_list: list):
-    """Writes a compact per-QDF execution summary to the app log."""
+def _log_qdf_queue_summary(qdf_list: list, ult0: str = '', soc: str = '', vid: str = ''):
+    """Writes shared queue context plus a concise per-QDF content summary to the app log."""
     if not qdf_list:
         logging.info('QDF queue summary: <empty>')
         return
 
+    logging.info(
+        f'Queue context -> VID: {vid or "N/A"} | ULT: {ult0 or "N/A"} | SOC: {soc or "N/A"}'
+    )
     logging.info('QDF queue summary:')
     for idx, item in enumerate(qdf_list, start=1):
         qdf = item.get('qdf', 'N/A')
-        ult0 = item.get('ult0', 'N/A')
-        soc = item.get('soc', 'x4')
         content = item.get('content')
-        if content is None:
-            selected_content = 'Full content'
-        else:
-            selected_content = ', '.join(_CONTENT_DISPLAY.get(k, k) for k in content)
-        kwargs_str = f" | kwargs={item.get('kwargs')}" if item.get('kwargs') else ''
-        logging.info(
-            f'  [{idx}/{len(qdf_list)}] QDF={qdf} | ULT={ult0} | SOC={soc} '
-            f'| Content={selected_content}{kwargs_str}'
-        )
+        selected_content = _format_content_summary(content)
+        logging.info(f'  [{idx}/{len(qdf_list)}] QDF {qdf}: {selected_content}')
 
 
 def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
@@ -4365,7 +4373,7 @@ def main():
 
             logging.info(f'COM: {com_port} | Mode: {mode} | Week: WW{week} | '
                          f'ULT: {ult0} | SOC: {soc} | QDFs: {[i["qdf"] for i in qdf_list]}')
-            _log_qdf_queue_summary(qdf_list)
+            _log_qdf_queue_summary(qdf_list, ult0=ult0, soc=soc, vid=summary_vid)
 
             _clean_signals(qdf_list)
             logging.info('Signals anteriores eliminadas.')
