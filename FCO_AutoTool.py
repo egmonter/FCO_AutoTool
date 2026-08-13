@@ -3246,6 +3246,29 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
     return all_results
 
 
+def _log_qdf_queue_summary(qdf_list: list):
+    """Writes a compact per-QDF execution summary to the app log."""
+    if not qdf_list:
+        logging.info('QDF queue summary: <empty>')
+        return
+
+    logging.info('QDF queue summary:')
+    for idx, item in enumerate(qdf_list, start=1):
+        qdf = item.get('qdf', 'N/A')
+        ult0 = item.get('ult0', 'N/A')
+        soc = item.get('soc', 'x4')
+        content = item.get('content')
+        if content is None:
+            selected_content = 'Full content'
+        else:
+            selected_content = ', '.join(_CONTENT_DISPLAY.get(k, k) for k in content)
+        kwargs_str = f" | kwargs={item.get('kwargs')}" if item.get('kwargs') else ''
+        logging.info(
+            f'  [{idx}/{len(qdf_list)}] QDF={qdf} | ULT={ult0} | SOC={soc} '
+            f'| Content={selected_content}{kwargs_str}'
+        )
+
+
 def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
                    content=None, mode=2, soc='x4', kwargs=None, vid: str = '',
                    ult_vid: str = '', skip_boot: bool = False) -> tuple:
@@ -4342,6 +4365,7 @@ def main():
 
             logging.info(f'COM: {com_port} | Mode: {mode} | Week: WW{week} | '
                          f'ULT: {ult0} | SOC: {soc} | QDFs: {[i["qdf"] for i in qdf_list]}')
+            _log_qdf_queue_summary(qdf_list)
 
             _clean_signals(qdf_list)
             logging.info('Signals anteriores eliminadas.')
