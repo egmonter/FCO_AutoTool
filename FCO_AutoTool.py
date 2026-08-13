@@ -127,7 +127,7 @@ BIOS_POST_DETECT_WAIT = 15             # wait after BIOS/F2 screen before parsin
 EFI_PROMPTS   = [b'Shell>', b'shell>', b'EFI Shell']
 SVOS_PROMPT   = b'root@'  # SVOS shell prompt prefix (hostname can vary: sut, dhcp1, etc.)
 SVOS_LOGIN_PROMPTS = [b' login:', b'login:', b'Login:']
-CENTOS_LOGIN_PROMPTS = [b'dmr-bkc login:', b' login:']
+CENTOS_LOGIN_PROMPTS = [b'dmr-bkc login:', b' login:', b'login:', b'Login:']
 CENTOS_SHELL_PROMPTS = [b'# ', b'root@', b'[root@']
 
 # Maximum time (seconds) to wait for long prompts
@@ -1455,7 +1455,13 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                 continue
             except TimeoutError:
                 _status(f'{CENTOS_GRUB_PATH} loading on {fs}:, waiting for login prompt...', 'wait')
-                s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
+                _read_until_any_with_periodic_enter(
+                    s,
+                    CENTOS_LOGIN_PROMPTS,
+                    timeout=CENTOS_BOOT_TIMEOUT,
+                    enter_every=10,
+                    tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
+                )
                 booted = True
                 login_seen = True
                 break
@@ -1468,7 +1474,13 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
         if not login_seen:
             _status('Waiting for CentOS login prompt...', 'wait')
             with _guard('CentOS login prompt'):
-                s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
+                _read_until_any_with_periodic_enter(
+                    s,
+                    CENTOS_LOGIN_PROMPTS,
+                    timeout=CENTOS_BOOT_TIMEOUT,
+                    enter_every=10,
+                    tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
+                )
 
         _status('Entering user: root', 'step')
         s.send('root')
