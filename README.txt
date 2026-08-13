@@ -84,12 +84,23 @@ TOOL 1 (FCO Automation):
            * Solar
            * MLC
            * CentOS Boot (optional: reboots system, boots via \\EFI\\centos\\grubx64.efi,
-                          login root/root, runs ifconfig check)
+                  login root/root, runs ifconfig check)
+                  If the serial console reaches LINUX 8.13 but no login prompt
+                  appears, the run is marked as conditional PASS with a note
+                  that login could not be completed from serial.
+                  In that case the summary keeps the boot as PASS, but flags the
+                  operator note that serial login was not available.
        - If all SVOS content items are "no", it asks:
            * Run SVOS Boot check? (svosinfo response check)
        - Then it asks CentOS separately:
          * Run CentOS Boot Check?
        - You can run only SVOS check, only CentOS, both, or any content combination.
+
+      TEST MODE note:
+        - Prefixing the tool with 't' enables TEST_MODE.
+        - At a pause, press 'm' to enter manual serial mode.
+        - Manual serial mode supports: continue, /enter, /esc, /ctrlc, /wait <sec>.
+        - Any other text is sent directly to the serial console.
 
 TOOL 2 (Boot SVOS only):
   - COM port → same as above
@@ -111,6 +122,9 @@ TOOL 4 (Boot CentOS only):
   - If unit is fused: continues directly to CentOS boot
   - Boots via BIOS -> UEFI -> \\EFI\\centos\\grubx64.efi
   - Validates with login root/root + ifconfig
+  - If the serial console reaches LINUX 8.13 but no login prompt appears,
+    the run is marked as conditional PASS and notes that serial login could
+    not be completed
   - Keeps the tool window open after boot (Ctrl+C to close)
 
 The script writes qdf_list.json with the entered parameters and then waits
@@ -151,6 +165,13 @@ If you are running Mode 2 with CentOS boot selected, use this instead:
 
 The Mode 2 monitor waits for {QDF}_svos_done.signal and then handles the
 CentOS power cycle automatically. It does not run the overwrite.
+
+TEST_MODE / debug flow:
+  - TEST_MODE keeps the normal automation path, but pauses can be used to
+    inspect or interact with the live serial session.
+  - At a pause, press 'm' to enter manual serial mode.
+  - Use manual mode when you want to see the live boot state, send ENTER/ESC,
+    interrupt with Ctrl+C, or wait and drain serial output without leaving the tool.
 
 
 ==============================================
@@ -196,7 +217,9 @@ CentOS power cycle automatically. It does not run the overwrite.
 AUTOMATIC RETRY (BIOS / mountsv timeout)
 ------------------------------------------
 If during the main loop a QDF fails due to a timeout in BIOS or mountsv,
-FCO_AutoTool.py queues it for retry. When the main loop finishes:
+FCO_AutoTool.py queues it for retry. CentOS validation failures are not sent
+to the retry queue; they are reported on that QDF and the flow continues with
+the next one. When the main loop finishes:
 
   1. SVOS writes retry_needed.signal + retry_needed.json
   2. SV detects the signal, performs Power OFF → waits 5 min → Power ON
@@ -318,32 +341,26 @@ RESULTS AND LOGS
       monitor for the selected mode.
 
   - SPECIAL CASE: If ONLY CentOS Boot is selected (no SVOS tests):
-      - boot_svos() runs but skips setup_fco_dir (no directory/file setup)
+      - SVOS boot is skipped entirely
       - All SVOS tests are marked SKIPPED (not executed)
-      - System reboots directly to CentOS boot
+      - The tool goes directly to the CentOS boot flow
 
   - Timeout recovery behavior:
-      - If a test times out waiting for SVOS prompt, the tool now attempts
+      - If a test times out waiting for the SVOS prompt, the tool attempts an
         automatic shell recovery (Ctrl+C + ENTER) before continuing.
-      - This reduces cascaded false FAILs in later steps (Solar/parser/result write)
-        when the shell is stalled.
-      - Overall result = PASS if CentOS boot successful, FAIL otherwise
+      - This reduces cascaded false FAILs in later steps when the shell is stalled.
+      - CentOS boot can return a conditional PASS if the serial console reaches
+        LINUX 8.13 but no usable login prompt appears.
+      - A conditional PASS is logged as PASS with a warning/note in the summary.
 
-  - KEYPRESS SKIP DURING TIMEOUT (Windows only):
-      When waiting at "Looking for BIOS screen..." and the system appears stuck in FF or
-      failed state, you can PRESS 'S' to immediately trigger the failure handling:
-      
-      - Boot appears stuck (FF state visible in console)
-      - Press 's' on your keyboard while the BIOS screen wait is active
-      - Skips the remaining timeout (e.g., from 10 min → immediate)
-      - Displays interactive prompt: [s]kip, [r]etry, [a]bort
-      - Choose action:
-          s = continue to next QDF (mark current as FAIL)
-          r = retry CentOS boot once more
-          a = abort the entire tool execution
-      
-      Benefits:
-      - No passive 15-minute waits when you see FF
-      - Immediate user response needed vs. timeout waiting
-      - Full control over next steps
-      - Result log correctly marks FAIL vs. PASS based on your choice
+  - CentOS failure handling:
+      - If CentOS login or validation fails, the QDF is marked FAIL and the tool
+        continues with the next QDF.
+      - There is no interactive [skip/retry/abort] prompt for CentOS validation
+        failures in the normal flow.
+
+  - Serial login fallback for CentOS:
+      - The normal CentOS flow first tries the configured login credentials,
+        then falls back to root/root if the first attempt fails.
+      - If the console reaches LINUX 8.13 but never presents a usable login
+        prompt, the run is treated as a conditional PASS instead of a hard fail.
