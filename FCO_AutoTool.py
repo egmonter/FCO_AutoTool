@@ -1323,7 +1323,7 @@ def boot_centos_direct(s: SVOSSession):
     """
     CentOS direct login (TEST mode).
     Assumes CentOS grub is already executing (BIOS navigation skipped).
-    Waits for login prompt, enters root/root, runs ifconfig.
+    Waits for login prompt, tries root/password then root/root, runs ifconfig.
     """
     _status('CentOS Direct Login mode (TEST) — waiting for login prompt...', 'wait')
     
@@ -1332,17 +1332,8 @@ def boot_centos_direct(s: SVOSSession):
             s.read_until_any(CENTOS_LOGIN_PROMPTS, timeout=CENTOS_BOOT_TIMEOUT)
         _status('Login prompt detected.', 'ok')
         
-        _status('Entering user: root', 'step')
-        s.send('root')
-        
-        with _guard('prompt "Password:"'):
-            s.read_until_any(['Password:', 'password:'], timeout=30)
-        _status('Entering password...', 'step')
-        s.send('root')
-        
         with _guard('CentOS shell prompt after login'):
-            s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
-        _status('CentOS login successful.', 'ok')
+            _centos_login_with_fallback(s)
         
         _status('Running ifconfig to validate the OS...', 'step')
         s.send('ifconfig')
@@ -1357,11 +1348,46 @@ def boot_centos_direct(s: SVOSSession):
         return 'FAIL'
 
 
+def _centos_login_with_fallback(s: SVOSSession):
+    """Attempts CentOS login with root/password first, then root/root fallback."""
+    attempts = [
+        ('root', 'password'),
+        ('root', 'root'),
+    ]
+
+    for idx, (user, password) in enumerate(attempts, start=1):
+        if idx > 1:
+            _status('Primary CentOS password rejected. Trying fallback credentials...', 'warn')
+            with _guard('CentOS login prompt retry'):
+                _read_until_any_with_periodic_enter(
+                    s,
+                    CENTOS_LOGIN_PROMPTS,
+                    timeout=30,
+                    enter_every=5,
+                    tick_msg='Waiting CentOS login prompt for fallback attempt...'
+                )
+
+        _status(f'Entering user: {user} (attempt {idx}/{len(attempts)})', 'step')
+        s.send(user)
+
+        with _guard('prompt "Password:"'):
+            s.read_until_any(['Password:', 'password:'], timeout=30)
+        _status('Entering password...', 'step')
+        s.send(password)
+
+        matched, _ = s.read_until_any(CENTOS_SHELL_PROMPTS + CENTOS_LOGIN_PROMPTS, timeout=60)
+        if matched in CENTOS_SHELL_PROMPTS:
+            _status(f'CentOS login successful using {user}/{password}.', 'ok')
+            return
+
+    raise FCOStepError('CentOS login failed with all configured credentials (root/password, root/root).')
+
+
 def boot_centos(s: SVOSSession, fused_nudge: bool = False):
     """
     CentOS boot sequence:
       BIOS -> Boot Manager Menu -> UEFI Internal Shell
-            -> FS0/FS1/FS2 -> \\efi\\centos\\grubx64.efi -> login root/root
+            -> FS0/FS1/FS2 -> \\efi\\centos\\grubx64.efi -> login
       -> ifconfig (basic sanity check)
     """
     s.begin_serial_capture('boot_to_efi')
@@ -1482,17 +1508,8 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                     tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
                 )
 
-        _status('Entering user: root', 'step')
-        s.send('root')
-
-        with _guard('prompt "Password:"'):
-            s.read_until_any(['Password:', 'password:'], timeout=30)
-        _status('Entering password...', 'step')
-        s.send('root')
-
         with _guard('CentOS shell prompt after login'):
-            s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
-        _status('CentOS login successful.', 'ok')
+            _centos_login_with_fallback(s)
 
         _status('Running ifconfig to validate the OS boot...', 'step')
         s.send('ifconfig')
