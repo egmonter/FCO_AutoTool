@@ -2850,9 +2850,17 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
     for i, item in enumerate(qdf_list):
         qdf  = item['qdf']
         ult0 = item['ult0']
+        soc = item.get('soc', 'x4')
+        content = item.get('content')
+        if content is None:
+            selected_content = 'Full content'
+        else:
+            selected_content = ', '.join(_CONTENT_DISPLAY.get(k, k) for k in content)
+        kwargs_str = f" | kwargs: {item.get('kwargs')}" if item.get('kwargs') else ''
 
         print(f'\n{"="*60}')
         _status(f'QDF {i+1}/{len(qdf_list)}: {qdf}', 'step')
+        _status(f'QDF summary -> ULT: {ult0} | SOC: {soc} | Content: {selected_content}{kwargs_str}', 'info')
         print(f'{"="*60}')
 
         try:
@@ -2884,7 +2892,6 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 if sig.exists():
                     sig.unlink()
 
-            content = item.get('content')
             has_svos_tests = _has_svos_content(content)
             # Skip SVOS boot when only CentOS is selected.
             needs_svos = content is None or any(
