@@ -371,6 +371,7 @@ TEST_MODE   = False
 # Times each step and shows it in the final logs (always active).
 CRONOS_MODE = True
 _timings: dict = {}  # {qdf: {step: elapsed_seconds}}
+_ACTIVE_SERIAL_SESSION = None
 
 
 class _NullRuntimeMonitor:
@@ -641,20 +642,96 @@ def _pause(msg: str = 'Press any key to continue...'):
     """Pauses execution only in TEST_MODE."""
     if not TEST_MODE:
         return
-    print(f'\n  [PAUSE] {msg}', flush=True)
-    if sys.platform == 'win32':
-        import msvcrt
-        msvcrt.getch()
-    else:
-        import tty, termios
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
+    while True:
+        print(f'\n  [PAUSE] {msg}', flush=True)
+        print('  Press any key to continue, or m for manual serial mode.', flush=True)
+        manual_requested = False
+        if sys.platform == 'win32':
+            import msvcrt
+            key = msvcrt.getch()
+            manual_requested = key in (b'm', b'M')
+        else:
+            import tty, termios
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setraw(fd)
+                key = sys.stdin.read(1)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            manual_requested = key in ('m', 'M')
+
+        print()
+        if manual_requested:
+            _manual_serial_mode()
+            continue
+        return
+
+
+def _drain_serial_for_seconds(s: 'SVOSSession', seconds: float = 1.0):
+    """Prints incoming serial data for a short time window."""
+    deadline = time.time() + max(0.1, float(seconds))
+    saw_data = False
+    while time.time() < deadline:
+        chunk = s.ser.read(512)
+        if chunk:
+            s.buf += chunk
+            s._print(chunk)
+            saw_data = True
+            deadline = time.time() + 0.3
+        else:
+            time.sleep(0.05)
+    if not saw_data:
+        _status('Manual serial mode: no new serial output.', 'info')
+
+
+def _manual_serial_mode():
+    """Interactive serial passthrough for TEST_MODE pauses."""
+    s = _ACTIVE_SERIAL_SESSION
+    if s is None:
+        _status('Manual serial mode unavailable: no active serial session.', 'warn')
+        return
+
+    print('  [MANUAL MODE] Active serial control.', flush=True)
+    print('  Commands: continue | /enter | /esc | /ctrlc | /wait <sec>', flush=True)
+    print('  Any other text is sent as a serial command (with Enter).', flush=True)
+
+    while True:
         try:
-            tty.setraw(fd)
-            sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    print()
+            cmd = input('  [MANUAL] > ').strip()
+        except (EOFError, OSError):
+            _status('Manual mode input unavailable. Returning to automation.', 'warn')
+            return
+
+        low = cmd.lower()
+        if low in ('continue', 'c', 'exit', 'quit'):
+            _status('Leaving manual serial mode. Resuming automation.', 'info')
+            return
+        if low == '/enter' or cmd == '':
+            s.send_enter()
+            _drain_serial_for_seconds(s, 1.0)
+            continue
+        if low == '/esc':
+            s.send_escape()
+            _drain_serial_for_seconds(s, 1.0)
+            continue
+        if low == '/ctrlc':
+            s.send_key(b'\x03')
+            _drain_serial_for_seconds(s, 1.0)
+            continue
+        if low.startswith('/wait'):
+            parts = cmd.split(maxsplit=1)
+            wait_s = 3.0
+            if len(parts) == 2:
+                try:
+                    wait_s = float(parts[1])
+                except ValueError:
+                    _status('Invalid /wait value. Using 3 seconds.', 'warn')
+            _drain_serial_for_seconds(s, wait_s)
+            continue
+
+        s.send(cmd)
+        _drain_serial_for_seconds(s, 1.0)
 
 
 def _hold_open_until_interrupt(title: str):
@@ -954,6 +1031,9 @@ class SVOSSession:
         self.buf = b''
 
     def close(self):
+        global _ACTIVE_SERIAL_SESSION
+        if _ACTIVE_SERIAL_SESSION is self:
+            _ACTIVE_SERIAL_SESSION = None
         self.ser.close()
 
     def _print(self, data: bytes):
@@ -2741,7 +2821,9 @@ def _open_serial(com_port: str) -> 'SVOSSession':
     """
     while True:
         try:
+            global _ACTIVE_SERIAL_SESSION
             s = SVOSSession(com_port)
+            _ACTIVE_SERIAL_SESSION = s
             logging.info(f'Port {com_port} opened at {BAUDRATE} baud.')
             # Clear stale serial/driver leftovers so a new run starts from a clean buffer.
             try:
