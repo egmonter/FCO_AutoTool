@@ -3105,22 +3105,21 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             )
 
             t0_boot = time.time()
-            with _monitor_stage(f'{qdf} - Boot SVOS and setup'):
-                if needs_svos:
-                    if skip_boot_once:
-                        _status('Skip boot enabled: validating current SVOS prompt...', 'info')
-                        if _is_svos_prompt_ready(s):
-                            _status('SVOS prompt detected. Continuing without boot.', 'ok')
-                        else:
-                            _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
-                            boot_svos(s, fused_nudge=(mode == 4))
-                        skip_boot_once = False
+            if needs_svos:
+                if skip_boot_once:
+                    _status('Skip boot enabled: validating current SVOS prompt...', 'info')
+                    if _is_svos_prompt_ready(s):
+                        _status('SVOS prompt detected. Continuing without boot.', 'ok')
                     else:
+                        _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
                         boot_svos(s, fused_nudge=(mode == 4))
-                    if has_svos_tests:
-                        setup_fco_dir(s, qdf, week)
+                    skip_boot_once = False
                 else:
-                    _status('CentOS-only content: skipping SVOS boot.', 'info')
+                    boot_svos(s, fused_nudge=(mode == 4))
+                if has_svos_tests:
+                    setup_fco_dir(s, qdf, week)
+            else:
+                _status('CentOS-only content: skipping SVOS boot.', 'info')
 
             if CRONOS_MODE:
                 _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot
@@ -3315,13 +3314,12 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     t in content_r for t in CONTENT_TESTS if t != 'centos_boot'
                 )
                 t0_boot_r = time.time()
-                with _monitor_stage(f'{qdf} - Retry Boot SVOS and setup'):
-                    if needs_svos_r:
-                        boot_svos(s, fused_nudge=(mode == 4))
-                        if has_svos_tests_r:
-                            setup_fco_dir(s, qdf, week)
-                    else:
-                        _status('CentOS-only retry: skipping SVOS boot.', 'info')
+                if needs_svos_r:
+                    boot_svos(s, fused_nudge=(mode == 4))
+                    if has_svos_tests_r:
+                        setup_fco_dir(s, qdf, week)
+                else:
+                    _status('CentOS-only retry: skipping SVOS boot.', 'info')
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['boot'] = time.time() - t0_boot_r
 
@@ -3484,21 +3482,20 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     )
     has_svos_tests = _has_svos_content(content)
 
-    with _monitor_stage(f'{qdf} - Boot SVOS and setup'):
-        if needs_svos:
-            if skip_boot:
-                _status('Skip boot enabled: validating current SVOS prompt...', 'info')
-                if _is_svos_prompt_ready(s):
-                    _status('SVOS prompt detected. Continuing without boot.', 'ok')
-                else:
-                    _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
-                    boot_svos(s, fused_nudge=(mode in (2, 3)))
+    if needs_svos:
+        if skip_boot:
+            _status('Skip boot enabled: validating current SVOS prompt...', 'info')
+            if _is_svos_prompt_ready(s):
+                _status('SVOS prompt detected. Continuing without boot.', 'ok')
             else:
+                _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
                 boot_svos(s, fused_nudge=(mode in (2, 3)))
-            if has_svos_tests:
-                setup_fco_dir(s, qdf, week)
         else:
-            _status('CentOS-only content: skipping SVOS boot.', 'info')
+            boot_svos(s, fused_nudge=(mode in (2, 3)))
+        if has_svos_tests:
+            setup_fco_dir(s, qdf, week)
+    else:
+        _status('CentOS-only content: skipping SVOS boot.', 'info')
 
     results = {}
 
