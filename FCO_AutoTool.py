@@ -1125,12 +1125,9 @@ def _read_until_any_with_periodic_enter(s: SVOSSession, patterns, timeout=SVOS_T
                                         enter_every: int = 5,
                                         tick_msg: str = 'Waiting... sending ENTER keepalive...'):
     """Reads until any pattern is found, sending ENTER periodically while waiting."""
-    if enter_every <= 0:
-        enter_every = 5
-
     enc = [p.encode() if isinstance(p, str) else p for p in patterns]
     deadline = (time.time() + timeout) if timeout is not None else None
-    next_enter = time.time() + enter_every
+    next_enter = (time.time() + enter_every) if enter_every > 0 else None
 
     while True:
         chunk = s.ser.read(512)
@@ -1147,7 +1144,7 @@ def _read_until_any_with_periodic_enter(s: SVOSSession, patterns, timeout=SVOS_T
         if deadline is not None and now > deadline:
             raise TimeoutError(f'Timeout ({timeout}s) waiting for patterns: {patterns}')
 
-        if now >= next_enter:
+        if next_enter is not None and now >= next_enter:
             _status(tick_msg, 'info')
             s.send_enter()
             next_enter = now + enter_every
@@ -1506,7 +1503,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                     s,
                     CENTOS_LOGIN_PROMPTS,
                     timeout=CENTOS_BOOT_TIMEOUT,
-                    enter_every=10,
+                    enter_every=0 if TEST_MODE else 10,
                     tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
                 )
                 booted = True
@@ -1525,7 +1522,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                     s,
                     CENTOS_LOGIN_PROMPTS,
                     timeout=CENTOS_BOOT_TIMEOUT,
-                    enter_every=10,
+                    enter_every=0 if TEST_MODE else 10,
                     tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
                 )
 
