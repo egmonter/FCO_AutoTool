@@ -2490,40 +2490,8 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
     except Exception as e:
         _status(f'CentOS boot FAILED: {e}', 'fail')
         logging.error(f'CentOS boot failed for {qdf}: {e}', exc_info=True)
-        
-        # Interactive prompt: allow user to skip, retry, or abort
-        print('\n' + '='*60)
-        print('  CentOS Boot Failed — Choose Action')
-        print('='*60)
-        print(f'  Error: {e}')
-        print()
-        print('  Options:')
-        print('    [s] Skip — continue to next QDF (mark as FAIL)')
-        print('    [r] Retry — attempt CentOS boot again')
-        print('    [a] Abort — exit tool completely')
-        print()
-        
-        while True:
-            choice = input('  Choice [s/r/a]: ').strip().lower()
-            if choice in ('s', 'skip'):
-                _status('Skipping to next QDF.', 'info')
-                return 'FAIL'
-            elif choice in ('r', 'retry'):
-                _status('Retrying CentOS boot...', 'step')
-                try:
-                    boot_centos(s, fused_nudge=(mode in (2, 3, 4)))
-                    _status('CentOS boot successful (retry).', 'ok')
-                    _pause('CentOS boot OK — validate and press any key to continue...')
-                    return 'PASS'
-                except Exception as e_retry:
-                    _status(f'Retry also FAILED: {e_retry}', 'fail')
-                    logging.error(f'CentOS boot retry failed for {qdf}: {e_retry}', exc_info=True)
-                    return 'FAIL'
-            elif choice in ('a', 'abort'):
-                _status('Aborting execution.', 'fail')
-                sys.exit(1)
-            else:
-                print('  Invalid choice. Enter s, r, or a.')
+        _status('Auto-skip enabled: continuing with next QDF after CentOS failure.', 'warn')
+        return 'FAIL'
 
 
 # ---------------------------------------------------------------------------
