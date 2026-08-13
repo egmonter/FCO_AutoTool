@@ -1572,129 +1572,112 @@ def _centos_login_or_manual_success(s: SVOSSession) -> str:
             print('  Invalid choice. Enter c, r, or f.')
 
 
-def boot_centos(s: SVOSSession, fused_nudge: bool = False):
+def boot_centos(s: SVOSSession, fused_nudge: bool = False,
+                monitor_split: bool = False, stage_prefix: str = ''):
     """
     CentOS boot sequence:
       BIOS -> Boot Manager Menu -> UEFI Internal Shell
             -> FS0/FS1/FS2 -> \\efi\\centos\\grubx64.efi -> login
       -> ifconfig (basic sanity check)
     """
-    s.begin_serial_capture('boot_to_efi')
-    boot_to_efi_log = None
-    try:
-        _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
-        time.sleep(BIOS_REBOOT_WAIT)
-        s.flush()
+    stage_boot_to_efi = f'{stage_prefix} - Boot to EFI' if stage_prefix else 'Boot to EFI'
+    stage_boot_centos = f'{stage_prefix} - Boot CentOS' if stage_prefix else 'Boot CentOS'
 
-        _status('Looking for BIOS screen...', 'wait')
-        _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
-        if fused_nudge:
-            _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
-        _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
-        _status('BIOS detected.', 'ok')
-        _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
-        time.sleep(BIOS_POST_DETECT_WAIT)
-
-        for nav_retry in range(BIOS_NAV_RETRIES):
-            try:
-                _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
-                navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
-
-                time.sleep(1.0)
-                _, screen_text = s.read_screen(wait=1.0)
-                internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
-                if not internal_shell_visible:
-                    _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
-                    s.send_escape()
-                    time.sleep(1.5)
-                    continue
-                _status('Inside Boot Manager Menu.', 'ok')
-
-                _status('Looking for UEFI Internal Shell...', 'step')
-                navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
-                _status('UEFI Internal Shell selected.', 'ok')
-                break
-
-            except FCOStepError as e:
-                if nav_retry < BIOS_NAV_RETRIES - 1:
-                    _status(f'Not found ({e}). ESC and retrying...', 'warn')
-                    s.send_escape()
-                    time.sleep(1.5)
-                else:
-                    raise FCOStepError(
-                        f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
-                        f'Last error: {e}')
-
-        _break_internal_shell_countdown(s)
-        _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
-        time.sleep(INT_SHELL_POST_ESC_WAIT)
-        _status('Sending ENTER after post-ESC settle...', 'step')
-        s.send_enter()
-        _status('Waiting for EFI Shell...', 'wait')
-        with _guard('EFI Shell prompt'):
-            matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
-        matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
-        _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
-    finally:
-        boot_to_efi_log = s.end_serial_capture()
-        if boot_to_efi_log:
-            _status(f'Serial boot log saved: {boot_to_efi_log}', 'info')
-
-    s.begin_serial_capture('efi_to_centos')
-    efi_to_centos_log = None
-    booted = False
-    login_seen = False
-    try:
-        for fs in ('FS0', 'FS1', 'FS2'):
-            _status(f'Trying {fs}: ...', 'step')
+    boot_to_efi_ctx = _monitor_stage(stage_boot_to_efi) if monitor_split else contextlib.nullcontext()
+    with boot_to_efi_ctx:
+        s.begin_serial_capture('boot_to_efi')
+        boot_to_efi_log = None
+        try:
+            _status(f'Waiting for system reboot ({BIOS_REBOOT_WAIT}s)...', 'wait')
+            time.sleep(BIOS_REBOOT_WAIT)
             s.flush()
-            s.send(f'{fs}:')
-            try:
-                s.read_until(f'{fs}:\\', timeout=15)
-            except TimeoutError:
-                _status(f'{fs}: not available, trying next...', 'info')
-                continue
 
-            _pause(f'Ready to launch {CENTOS_GRUB_PATH} from {fs}:. Press any key to continue...')
-            _status(f'Launching {CENTOS_GRUB_PATH} from {fs}: ...', 'step')
-            s.send_slow(CENTOS_GRUB_PATH, char_delay=0.05)
+            _status('Looking for BIOS screen...', 'wait')
+            _status("(Press 's' to skip BIOS wait and continue failure handling)", 'info')
+            if fused_nudge:
+                _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
+            _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
+            _status('BIOS detected.', 'ok')
+            _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
+            time.sleep(BIOS_POST_DETECT_WAIT)
 
-            EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
-            try:
-                matched, _ = s.read_until_any(CENTOS_LOGIN_PROMPTS + EFI_PROMPT, timeout=10)
-                if matched in CENTOS_LOGIN_PROMPTS:
-                    booted = True
-                    login_seen = True
-                    break
-                _status(f'{CENTOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
-                continue
-            except TimeoutError:
-                _status(f'{CENTOS_GRUB_PATH} loading on {fs}:, waiting for login prompt...', 'wait')
-                wait_result = _wait_for_centos_login_or_conditional(
-                    s,
-                    timeout=CENTOS_BOOT_TIMEOUT,
-                    enter_every=0 if TEST_MODE else 10,
-                    tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
-                )
-                if wait_result == 'CONDITIONAL_PASS':
-                    note = ('CentOS reached LINUX 8.13 but no serial login prompt was detected for 3 minutes; '
-                            'marking conditional PASS (manual/KBM login may be required).')
-                    _status(note, 'warn')
-                    logging.warning(note)
-                    return 'CONDITIONAL_PASS'
-                booted = True
-                login_seen = True
-                break
-
-        if not booted:
-            raise FCOStepError(
-                f'Could not find {CENTOS_GRUB_PATH} on FS0:, FS1: or FS2:. '
-                'Verify that the filesystem is available.')
-
-        if not login_seen:
-            _status('Waiting for CentOS login prompt...', 'wait')
-            with _guard('CentOS login prompt'):
+            for nav_retry in range(BIOS_NAV_RETRIES):
                 try:
+                    _status(f'Looking for Boot Manager Menu (attempt {nav_retry+1}/{BIOS_NAV_RETRIES})...', 'wait')
+                    navigate_bios_menu(s, BIOS_BOOT_MGR, arrow_delay=BIOS_ARROW_DELAY)
+
+                    time.sleep(1.0)
+                    _, screen_text = s.read_screen(wait=1.0)
+                    internal_shell_visible = ('Internal Shell' in screen_text) or ('UEFI Internal Shell' in screen_text)
+                    if not internal_shell_visible:
+                        _status('Entered Boot Maintenance Manager by mistake. Sending ESC...', 'warn')
+                        s.send_escape()
+                        time.sleep(1.5)
+                        continue
+                    _status('Inside Boot Manager Menu.', 'ok')
+
+                    _status('Looking for UEFI Internal Shell...', 'step')
+                    navigate_bios_menu(s, BIOS_INT_SHELL, arrow_delay=BIOS_ARROW_DELAY)
+                    _status('UEFI Internal Shell selected.', 'ok')
+                    break
+
+                except FCOStepError as e:
+                    if nav_retry < BIOS_NAV_RETRIES - 1:
+                        _status(f'Not found ({e}). ESC and retrying...', 'warn')
+                        s.send_escape()
+                        time.sleep(1.5)
+                    else:
+                        raise FCOStepError(
+                            f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
+                            f'Last error: {e}')
+
+            _break_internal_shell_countdown(s)
+            _status(f'Post-ESC settle wait: {INT_SHELL_POST_ESC_WAIT}s before Shell prompt search...', 'wait')
+            time.sleep(INT_SHELL_POST_ESC_WAIT)
+            _status('Sending ENTER after post-ESC settle...', 'step')
+            s.send_enter()
+            _status('Waiting for EFI Shell...', 'wait')
+            with _guard('EFI Shell prompt'):
+                matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
+            matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
+            _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
+        finally:
+            boot_to_efi_log = s.end_serial_capture()
+            if boot_to_efi_log:
+                _status(f'Serial boot log saved: {boot_to_efi_log}', 'info')
+
+    boot_centos_ctx = _monitor_stage(stage_boot_centos) if monitor_split else contextlib.nullcontext()
+    with boot_centos_ctx:
+        s.begin_serial_capture('efi_to_centos')
+        efi_to_centos_log = None
+        booted = False
+        login_seen = False
+        try:
+            for fs in ('FS0', 'FS1', 'FS2'):
+                _status(f'Trying {fs}: ...', 'step')
+                s.flush()
+                s.send(f'{fs}:')
+                try:
+                    s.read_until(f'{fs}:\\', timeout=15)
+                except TimeoutError:
+                    _status(f'{fs}: not available, trying next...', 'info')
+                    continue
+
+                _pause(f'Ready to launch {CENTOS_GRUB_PATH} from {fs}:. Press any key to continue...')
+                _status(f'Launching {CENTOS_GRUB_PATH} from {fs}: ...', 'step')
+                s.send_slow(CENTOS_GRUB_PATH, char_delay=0.05)
+
+                EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
+                try:
+                    matched, _ = s.read_until_any(CENTOS_LOGIN_PROMPTS + EFI_PROMPT, timeout=10)
+                    if matched in CENTOS_LOGIN_PROMPTS:
+                        booted = True
+                        login_seen = True
+                        break
+                    _status(f'{CENTOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
+                    continue
+                except TimeoutError:
+                    _status(f'{CENTOS_GRUB_PATH} loading on {fs}:, waiting for login prompt...', 'wait')
                     wait_result = _wait_for_centos_login_or_conditional(
                         s,
                         timeout=CENTOS_BOOT_TIMEOUT,
@@ -1707,27 +1690,52 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                         _status(note, 'warn')
                         logging.warning(note)
                         return 'CONDITIONAL_PASS'
-                except TimeoutError:
-                    if _centos_reached_linux_banner(s):
-                        note = ('CentOS reached LINUX 8.13 but no serial login prompt was detected; '
-                                'marking conditional PASS (manual/KBM login may be required).')
-                        _status(note, 'warn')
-                        logging.warning(note)
-                        return 'CONDITIONAL_PASS'
-                    raise
+                    booted = True
+                    login_seen = True
+                    break
 
-        with _guard('CentOS shell prompt after login'):
-            _centos_login_with_fallback(s)
+            if not booted:
+                raise FCOStepError(
+                    f'Could not find {CENTOS_GRUB_PATH} on FS0:, FS1: or FS2:. '
+                    'Verify that the filesystem is available.')
 
-        _status('Running ifconfig to validate the OS boot...', 'step')
-        s.send('ifconfig')
-        with _guard('ifconfig response in CentOS'):
-            s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
-        _status('CentOS boot validated with ifconfig.', 'ok')
-    finally:
-        efi_to_centos_log = s.end_serial_capture()
-        if efi_to_centos_log:
-            _status(f'Serial OS log saved: {efi_to_centos_log}', 'info')
+            if not login_seen:
+                _status('Waiting for CentOS login prompt...', 'wait')
+                with _guard('CentOS login prompt'):
+                    try:
+                        wait_result = _wait_for_centos_login_or_conditional(
+                            s,
+                            timeout=CENTOS_BOOT_TIMEOUT,
+                            enter_every=0 if TEST_MODE else 10,
+                            tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
+                        )
+                        if wait_result == 'CONDITIONAL_PASS':
+                            note = ('CentOS reached LINUX 8.13 but no serial login prompt was detected for 3 minutes; '
+                                    'marking conditional PASS (manual/KBM login may be required).')
+                            _status(note, 'warn')
+                            logging.warning(note)
+                            return 'CONDITIONAL_PASS'
+                    except TimeoutError:
+                        if _centos_reached_linux_banner(s):
+                            note = ('CentOS reached LINUX 8.13 but no serial login prompt was detected; '
+                                    'marking conditional PASS (manual/KBM login may be required).')
+                            _status(note, 'warn')
+                            logging.warning(note)
+                            return 'CONDITIONAL_PASS'
+                        raise
+
+            with _guard('CentOS shell prompt after login'):
+                _centos_login_with_fallback(s)
+
+            _status('Running ifconfig to validate the OS boot...', 'step')
+            s.send('ifconfig')
+            with _guard('ifconfig response in CentOS'):
+                s.read_until_any(CENTOS_SHELL_PROMPTS, timeout=60)
+            _status('CentOS boot validated with ifconfig.', 'ok')
+        finally:
+            efi_to_centos_log = s.end_serial_capture()
+            if efi_to_centos_log:
+                _status(f'Serial OS log saved: {efi_to_centos_log}', 'info')
 
 
 # ---------------------------------------------------------------------------
@@ -2688,9 +2696,13 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             
             _status('Wrapper execution completed by pysv.', 'ok')
         
-        # Boot CentOS
-        with _monitor_stage(f'{qdf} - Boot CentOS'):
-            centos_result = boot_centos(s, fused_nudge=(mode in (2, 3, 4)))
+        # Boot CentOS (split monitor stages: Boot to EFI -> Boot CentOS)
+        centos_result = boot_centos(
+            s,
+            fused_nudge=(mode in (2, 3, 4)),
+            monitor_split=True,
+            stage_prefix=qdf,
+        )
         if centos_result == 'CONDITIONAL_PASS':
             _status('CentOS boot conditional PASS: reached LINUX 8.13 but no serial login prompt was available.', 'warn')
         else:
