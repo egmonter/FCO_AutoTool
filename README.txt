@@ -88,6 +88,8 @@ TOOL 1 (FCO Automation):
                   If the serial console reaches LINUX 8.13 but no login prompt
                   appears, the run is marked as conditional PASS with a note
                   that login could not be completed from serial.
+                  This conditional PASS is applied after ~3 minutes waiting
+                  for serial login in that state.
                   In that case the summary keeps the boot as PASS, but flags the
                   operator note that serial login was not available.
        - If all SVOS content items are "no", it asks:
@@ -125,6 +127,7 @@ TOOL 4 (Boot CentOS only):
   - If the serial console reaches LINUX 8.13 but no login prompt appears,
     the run is marked as conditional PASS and notes that serial login could
     not be completed
+    (triggered after ~3 minutes in that state)
   - Keeps the tool window open after boot (Ctrl+C to close)
 
 The script writes qdf_list.json with the entered parameters and then waits
@@ -351,6 +354,8 @@ RESULTS AND LOGS
       - This reduces cascaded false FAILs in later steps when the shell is stalled.
       - CentOS boot can return a conditional PASS if the serial console reaches
         LINUX 8.13 but no usable login prompt appears.
+      - The conditional PASS cutoff is ~3 minutes of login wait after Linux
+        banner detection.
       - A conditional PASS is logged as PASS with a warning/note in the summary.
 
   - CentOS failure handling:

@@ -1491,6 +1491,46 @@ def _centos_reached_linux_banner(s: SVOSSession) -> bool:
     return 'LINUX' in text and '8.13' in text
 
 
+def _wait_for_centos_login_or_conditional(s: SVOSSession,
+                                          timeout: int,
+                                          enter_every: int,
+                                          conditional_after: int = 180,
+                                          tick_msg: str = 'Waiting CentOS login prompt, sending ENTER keepalive...'):
+    """Waits for CentOS login and returns 'LOGIN' or 'CONDITIONAL_PASS'.
+
+    If Linux banner is already present and login does not appear within
+    conditional_after seconds, returns CONDITIONAL_PASS early.
+    """
+    enc = [p.encode() if isinstance(p, str) else p for p in CENTOS_LOGIN_PROMPTS]
+    start = time.time()
+    deadline = start + timeout
+    next_enter = (start + enter_every) if enter_every > 0 else None
+
+    while True:
+        chunk = s.ser.read(512)
+        if chunk:
+            s.buf += chunk
+            s._print(chunk)
+
+        for p in enc:
+            if p in s.buf:
+                return 'LOGIN'
+
+        now = time.time()
+        if now >= deadline:
+            raise TimeoutError(f'Timeout ({timeout}s) waiting for patterns: {CENTOS_LOGIN_PROMPTS}')
+
+        if (now - start) >= conditional_after and _centos_reached_linux_banner(s):
+            return 'CONDITIONAL_PASS'
+
+        if next_enter is not None and now >= next_enter:
+            _status(tick_msg, 'info')
+            s.send_enter()
+            next_enter = now + enter_every
+
+        time.sleep(0.05)
+
+
 def _centos_login_or_manual_success(s: SVOSSession) -> str:
     """Tries serial CentOS login; in TEST_MODE allows success without serial login.
 
@@ -1630,13 +1670,18 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
                 continue
             except TimeoutError:
                 _status(f'{CENTOS_GRUB_PATH} loading on {fs}:, waiting for login prompt...', 'wait')
-                _read_until_any_with_periodic_enter(
+                wait_result = _wait_for_centos_login_or_conditional(
                     s,
-                    CENTOS_LOGIN_PROMPTS,
                     timeout=CENTOS_BOOT_TIMEOUT,
                     enter_every=0 if TEST_MODE else 10,
                     tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
                 )
+                if wait_result == 'CONDITIONAL_PASS':
+                    note = ('CentOS reached LINUX 8.13 but no serial login prompt was detected for 3 minutes; '
+                            'marking conditional PASS (manual/KBM login may be required).')
+                    _status(note, 'warn')
+                    logging.warning(note)
+                    return 'CONDITIONAL_PASS'
                 booted = True
                 login_seen = True
                 break
@@ -1650,13 +1695,18 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False):
             _status('Waiting for CentOS login prompt...', 'wait')
             with _guard('CentOS login prompt'):
                 try:
-                    _read_until_any_with_periodic_enter(
+                    wait_result = _wait_for_centos_login_or_conditional(
                         s,
-                        CENTOS_LOGIN_PROMPTS,
                         timeout=CENTOS_BOOT_TIMEOUT,
                         enter_every=0 if TEST_MODE else 10,
                         tick_msg='Waiting CentOS login prompt, sending ENTER keepalive...'
                     )
+                    if wait_result == 'CONDITIONAL_PASS':
+                        note = ('CentOS reached LINUX 8.13 but no serial login prompt was detected for 3 minutes; '
+                                'marking conditional PASS (manual/KBM login may be required).')
+                        _status(note, 'warn')
+                        logging.warning(note)
+                        return 'CONDITIONAL_PASS'
                 except TimeoutError:
                     if _centos_reached_linux_banner(s):
                         note = ('CentOS reached LINUX 8.13 but no serial login prompt was detected; '
