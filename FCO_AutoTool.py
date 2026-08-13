@@ -376,6 +376,7 @@ class _PopupRuntimeMonitor:
         self._stages = []
         self._current_idx = None
         self._tool_name = 'Waiting for tool...'
+        self._tool_started_at = time.time()
         self._last_render_text = ''
         self._ready = threading.Event()
         self._failed = threading.Event()
@@ -508,6 +509,7 @@ class _PopupRuntimeMonitor:
                     self._current_idx = len(self._stages) - 1
                 elif kind == 'tool':
                     self._tool_name = ev.get('name') or 'Waiting for tool...'
+                    self._tool_started_at = now
                 elif kind == 'end' and self._current_idx is not None:
                     cur = self._stages[self._current_idx]
                     if cur['end'] is None:
@@ -523,6 +525,8 @@ class _PopupRuntimeMonitor:
         lines = []
         with self._lock:
             lines.append(f'Tool: {self._tool_name}')
+            total_elapsed = max(0, int(now - self._tool_started_at))
+            lines.append(f'Total elapsed: {_fmt_hms(total_elapsed)}')
             lines.append('')
             if not self._stages:
                 lines.append('Waiting for first stage...')
