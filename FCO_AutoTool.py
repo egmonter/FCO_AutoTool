@@ -1386,18 +1386,18 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                 with _guard('SVOS login prompt retry (hostname login:)'):
                     s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
 
-            login_mode = _centos_login_or_manual_success(s)
-            if login_mode == 'fail':
-                _status('CentOS marked as FAIL. Continuing with next QDF.', 'warn')
-                return
+            _status('Entering user: root', 'step')
+            s.send('root')
 
-            if login_mode == 'manual':
-                _status('CentOS marked as SUCCESS without serial login (manual/Raritan login).', 'warn')
-                _status('Skipping serial-only CentOS validation steps because login was completed manually.', 'info')
-                return
+            with _guard('prompt "Password:"'):
+                s.read_until_any(['Password:', 'password:'], timeout=30)
+            _status('Entering password...', 'step')
+            s.send('svos')
 
             # 9. Wait for the root@... prompt (authenticated session)
-            _status('CentOS login successful. SVOS shell ready (root@... prompt).', 'ok')
+            with _guard('successful login - verify user/password (root/svos)'):
+                s.read_until(SVOS_PROMPT, timeout=30)
+            _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
 
             if not do_mountsv:
                 return
@@ -1529,47 +1529,6 @@ def _wait_for_centos_login_or_conditional(s: SVOSSession,
             next_enter = now + enter_every
 
         time.sleep(0.05)
-
-
-def _centos_login_or_manual_success(s: SVOSSession) -> str:
-    """Tries serial CentOS login; in TEST_MODE allows success without serial login.
-
-    Returns: 'serial', 'manual', or 'fail'.
-    """
-    try:
-        _centos_login_with_fallback(s)
-        return 'serial'
-    except FCOStepError as e:
-        if not TEST_MODE:
-            raise
-
-        _status(f'CentOS serial login not detected: {e}', 'warn')
-        print()
-        print('  CentOS login was not detected on serial.')
-        print('  Options:')
-        print('    [c] Continue as SUCCESS without serial login (manual/Raritan login)')
-        print('    [r] Retry serial login')
-        print('    [f] Fail and continue to next QDF')
-        print()
-
-        while True:
-            try:
-                choice = input('  Choice [c/r/f]: ').strip().lower()
-            except (EOFError, OSError):
-                _status('No interactive stdin available. Continuing as FAIL.', 'warn')
-                return 'fail'
-
-            if choice in ('c', 'continue', 'y', 'yes'):
-                _status('CentOS marked as SUCCESS without serial login (manual/Raritan login).', 'warn')
-                return 'manual'
-            if choice in ('r', 'retry'):
-                _status('Retrying CentOS serial login...', 'step')
-                return _centos_login_or_manual_success(s)
-            if choice in ('f', 'fail', 'skip'):
-                _status('CentOS marked as FAIL. Continuing with next QDF.', 'warn')
-                return 'fail'
-
-            print('  Invalid choice. Enter c, r, or f.')
 
 
 def boot_centos(s: SVOSSession, fused_nudge: bool = False,
