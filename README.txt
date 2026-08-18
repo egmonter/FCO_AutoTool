@@ -217,12 +217,13 @@ TEST_MODE / debug flow:
   moves to the next QDF
 
 
-AUTOMATIC RETRY (BIOS / mountsv timeout)
+AUTOMATIC RETRY (BIOS / mountsv / bootscript failure)
 ------------------------------------------
-If during the main loop a QDF fails due to a timeout in BIOS or mountsv,
-FCO_AutoTool.py queues it for retry. CentOS validation failures are not sent
-to the retry queue; they are reported on that QDF and the flow continues with
-the next one. When the main loop finishes:
+If during the main loop a QDF fails due to a timeout in BIOS or mountsv, or
+due to a bootscript/overwrite error reported by sv_automation, FCO_AutoTool.py
+queues it for retry. CentOS validation failures are not sent to the retry
+queue; they are reported on that QDF and the flow continues with the next
+one. When the main loop finishes:
 
   1. SVOS writes retry_needed.signal + retry_needed.json
   2. SV detects the signal, performs Power OFF → waits 5 min → Power ON

@@ -52,6 +52,10 @@ class BiosTimeoutError(FCOStepError):
     """BIOS screen did not appear within the expected time — retryable via power cycle."""
     pass
 
+class BootscriptError(FCOStepError):
+    """sv_automation reported a bootscript/overwrite failure — retryable via power cycle."""
+    pass
+
 
 @contextlib.contextmanager
 def _guard(step_desc: str):
@@ -3058,7 +3062,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
             content_sv_done = sv_done.read_text(encoding='utf-8').strip()
             if content_sv_done == 'error':
-                raise FCOStepError(f'sv_automation reported an error during overwrite of {qdf}.')
+                raise BootscriptError(f'sv_automation reported an error during overwrite of {qdf}.')
 
             _status(f'Fuse overwrite of {qdf} completed.', 'ok')
 
@@ -3218,7 +3222,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 entry['timing_total'] = timing_total
             all_results.append(entry)
 
-        except (MountsvTimeoutError, BiosTimeoutError) as e:
+        except (MountsvTimeoutError, BiosTimeoutError, BootscriptError) as e:
             reason = type(e).__name__
             _status(f'QDF {qdf}: {reason} — will be added to the retry queue', 'fail')
             logging.error(f'{reason} in QDF {qdf}: {e}')
