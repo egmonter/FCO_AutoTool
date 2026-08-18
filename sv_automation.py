@@ -216,10 +216,7 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
             sv_done.write_text('error\n')
             print(f"  Error signal written: {sv_done.name}")
             if i < len(qdf_list) - 1:
-                resp = input(f"  Continue with next QDF? (y/n): ").strip().lower()
-                if resp not in ('s', 'y', 'yes'):
-                    print("  Process aborted by the user.")
-                    return
+                print("  Auto-continue enabled: proceeding with next QDF after bootscript failure.")
                 continue
             else:
                 return
