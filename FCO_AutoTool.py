@@ -994,10 +994,13 @@ class SVOSSession:
 
     # ---- read ----
 
-    def read_until(self, expected, timeout=CMD_TIMEOUT) -> bytes:
-        """Reads until `expected` is found. timeout=None waits indefinitely."""
+    def read_until(self, expected, timeout=CMD_TIMEOUT, probe: bool = False) -> bytes:
+        """Reads until `expected` is found. timeout=None waits indefinitely.
+        probe=True keeps the timeout even in No Kill Time (used for detection logic)."""
         if isinstance(expected, str):
             expected = expected.encode()
+        if NO_KILL_TIME and not probe:
+            timeout = None
         deadline = (time.time() + timeout) if timeout is not None else None
         while True:
             chunk = self.ser.read(512)
@@ -1011,9 +1014,12 @@ class SVOSSession:
                 raise TimeoutError(f'Timeout ({timeout}s) waiting for: {expected!r}')
             time.sleep(0.05)
 
-    def read_until_any(self, patterns, timeout=CMD_TIMEOUT):
-        """Reads until any of the patterns is found. timeout=None waits indefinitely."""
+    def read_until_any(self, patterns, timeout=CMD_TIMEOUT, probe: bool = False):
+        """Reads until any of the patterns is found. timeout=None waits indefinitely.
+        probe=True keeps the timeout even in No Kill Time (used for detection logic)."""
         enc = [p.encode() if isinstance(p, str) else p for p in patterns]
+        if NO_KILL_TIME and not probe:
+            timeout = None
         deadline = (time.time() + timeout) if timeout is not None else None
         while True:
             chunk = self.ser.read(512)
@@ -1158,7 +1164,7 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int | None, enable_nudge:
                     f'BIOS screen did not appear within {timeout}s ({timeout//60} min)')
             wait = min(BIOS_NUDGE_INTERVAL, remaining)
         try:
-            s.read_until_any(BIOS_BANNERS, timeout=wait)
+            s.read_until_any(BIOS_BANNERS, timeout=wait, probe=True)
             return  # banner encontrado
         except TimeoutError:
             pass
@@ -1207,9 +1213,12 @@ def _break_internal_shell_countdown(s: SVOSSession, timeout: int = INT_SHELL_COU
 
 def _read_until_any_with_periodic_enter(s: SVOSSession, patterns, timeout=SVOS_TIMEOUT,
                                         enter_every: int = 5,
-                                        tick_msg: str = 'Waiting... sending ENTER keepalive...'):
+                                        tick_msg: str = 'Waiting... sending ENTER keepalive...',
+                                        probe: bool = False):
     """Reads until any pattern is found, sending ENTER periodically while waiting."""
     enc = [p.encode() if isinstance(p, str) else p for p in patterns]
+    if NO_KILL_TIME and not probe:
+        timeout = None
     deadline = (time.time() + timeout) if timeout is not None else None
     next_enter = (time.time() + enter_every) if enter_every > 0 else None
 
@@ -1243,6 +1252,16 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             -> FS0/FS1/FS2 -> \\efi\\debian\\grubx64.efi -> ENTER (ATTENTION) -> login
       -> mountsv (solo si do_mountsv=True)
     """
+    t_boot_start = time.time()
+
+    def _timing(label: str, since: float | None = None):
+        now = time.time()
+        msg = f'[TIMING] {label}: total {_fmt_dur(now - t_boot_start)}'
+        if since is not None:
+            msg += f' | stage {_fmt_dur(now - since)}'
+        _status(msg, 'info')
+        return now
+
     s.begin_serial_capture('boot_to_efi')
     boot_to_efi_log = None
     try:
@@ -1258,6 +1277,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                 _status('(Fused flow: DOWN arrow can be sent automatically to refresh static BIOS)', 'info')
             _wait_for_bios_with_nudge(s, BIOS_WAIT_TIMEOUT, enable_nudge=fused_nudge)
             _status('BIOS detected.', 'ok')
+            t_bios = _timing('BIOS detected')
             _status(f'Waiting {BIOS_POST_DETECT_WAIT}s for BIOS menu to stabilize before navigation...', 'wait')
             time.sleep(BIOS_POST_DETECT_WAIT)
 
@@ -1306,6 +1326,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
         matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
         _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
+        t_efi = _timing('EFI Shell ready', since=t_bios)
     finally:
         boot_to_efi_log = s.end_serial_capture()
         if boot_to_efi_log:
@@ -1323,7 +1344,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                 s.flush()
                 s.send(f'{fs}:')
                 try:
-                    s.read_until(f'{fs}:\\', timeout=15)
+                    s.read_until(f'{fs}:\\', timeout=15, probe=True)
                 except TimeoutError:
                     _status(f'{fs}: not available, trying next...', 'info')
                     continue
@@ -1342,7 +1363,8 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                         [ATTENTION] + EFI_PROMPT,
                         timeout=10,
                         enter_every=5,
-                        tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...'
+                        tick_msg='Waiting ATTENTION (grubx64 stage), sending ENTER keepalive...',
+                        probe=True
                     )
                     if matched == ATTENTION:
                         booted = True
@@ -1370,6 +1392,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                     'Verifica que el filesystem este disponible.')
 
             _status('ATTENTION message detected. Sending ENTER...', 'step')
+            t_attention = _timing('ATTENTION detected (grubx64)', since=t_efi)
             s.send_enter()
 
             # 7. Wait for the first root@... prompt (temporary post-ATTENTION shell)
@@ -1377,18 +1400,28 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             with _guard('shell SVOS post-boot (root@... prompt)'):
                 s.read_until(SVOS_PROMPT, timeout=SVOS_TIMEOUT)
             _status('Temporary shell ready. Running login...', 'step')
+            t_root = _timing('ATTENTION -> first root@ prompt', since=t_attention)
             s.send('login')
 
             # 8. Login: wait for generic "<hostname> login:" prompt, then send credentials.
             # Some platforms redraw slowly; if the first wait times out, send ENTER and retry once.
-            try:
+            if NO_KILL_TIME:
                 with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
+                    _read_until_any_with_periodic_enter(
+                        s,
+                        SVOS_LOGIN_PROMPTS,
+                        timeout=None,
+                        enter_every=10,
+                        tick_msg='Still waiting SVOS login prompt (No Kill Time), sending ENTER...'
+                    )
+            else:
+                try:
                     s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
-            except TimeoutError:
-                _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
-                s.send_enter()
-                with _guard('SVOS login prompt retry (hostname login:)'):
-                    s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
+                except TimeoutError:
+                    _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
+                    s.send_enter()
+                    with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
+                        s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
 
             _status('Entering user: root', 'step')
             s.send('root')
@@ -1402,6 +1435,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             with _guard('successful login - verify user/password (root/svos)'):
                 s.read_until(SVOS_PROMPT, timeout=30)
             _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
+            _timing('SVOS login complete', since=t_root)
 
             if not do_mountsv:
                 return
@@ -1411,11 +1445,13 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             # 10. Run mountsv and wait for the prompt to return
             _status('Running mountsv...', 'step')
             s.send('mountsv')
+            t_mountsv = time.time()
             try:
                 s.read_until(SVOS_PROMPT, timeout=MOUNTSV_TIMEOUT)
             except TimeoutError:
                 raise MountsvTimeoutError(f'mountsv did not respond within {MOUNTSV_TIMEOUT//60} min')
             _status('mountsv completed. SVOS mounted successfully.', 'ok')
+            _timing('mountsv complete', since=t_mountsv)
         finally:
             efi_to_svos_log = s.end_serial_capture()
             if efi_to_svos_log:
@@ -1507,7 +1543,7 @@ def _wait_for_centos_login_or_conditional(s: SVOSSession,
     """
     enc = [p.encode() if isinstance(p, str) else p for p in CENTOS_LOGIN_PROMPTS]
     start = time.time()
-    deadline = start + timeout
+    deadline = float('inf') if (NO_KILL_TIME or timeout is None) else start + timeout
     next_enter = (start + enter_every) if enter_every > 0 else None
 
     while True:
@@ -1621,7 +1657,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False,
                 s.flush()
                 s.send(f'{fs}:')
                 try:
-                    s.read_until(f'{fs}:\\', timeout=15)
+                    s.read_until(f'{fs}:\\', timeout=15, probe=True)
                 except TimeoutError:
                     _status(f'{fs}: not available, trying next...', 'info')
                     continue
@@ -1632,7 +1668,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False,
 
                 EFI_PROMPT = [b'Shell>', b'shell>', f'{fs}:\\'.encode(), f'{fs}:/'.encode()]
                 try:
-                    matched, _ = s.read_until_any(CENTOS_LOGIN_PROMPTS + EFI_PROMPT, timeout=10)
+                    matched, _ = s.read_until_any(CENTOS_LOGIN_PROMPTS + EFI_PROMPT, timeout=10, probe=True)
                     if matched in CENTOS_LOGIN_PROMPTS:
                         booted = True
                         login_seen = True
@@ -2566,9 +2602,9 @@ def _is_svos_prompt_ready(s: SVOSSession, timeout: int = 4) -> bool:
         # Two ENTER round-trips reduce false positives from stale root@ text.
         s.flush()
         s.send_enter()
-        s.read_until_any([SVOS_PROMPT], timeout=timeout)
+        s.read_until_any([SVOS_PROMPT], timeout=timeout, probe=True)
         s.send_enter()
-        s.read_until_any([SVOS_PROMPT], timeout=timeout)
+        s.read_until_any([SVOS_PROMPT], timeout=timeout, probe=True)
         return True
     except Exception:
         return False
