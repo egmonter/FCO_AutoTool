@@ -252,6 +252,7 @@ ROCKET_CMDS = [
 
 # Rocket dsa/vtd: try direct fast path first; on failure/unknown use contention recovery sequence.
 ROCKET_DSA_CMD = ('rocket --cfgs --atlas "--hw dram,dsa,vtd" -M 5; rtm -c rtm.cfg -M 5 -f rocket_dram_dsa.txt', 'rocket_dram_dsa')
+ROCKET_ALL_CMDS = [ROCKET_CMDS[0], ROCKET_DSA_CMD, ROCKET_CMDS[1]]
 
 SOLAR_CMD = ('/usr/bin/solar/solar.sh /meshgv '
              '-ratioPUnit0 "" -ratioPUnit1 "" -ratioPUnit2 P0...Pn '
@@ -1859,8 +1860,7 @@ def run_rocket(s: SVOSSession) -> dict:
       2) dram,dsa,vtd (fast path only)
       3) dram,iax
 
-    If dsa,vtd fails/unknown, fallback sequence is executed later by run_rocket_dsa()
-    to preserve the original end-of-flow behavior.
+    Failed configurations are retried later after the initial suite completes.
     """
     results = {}
 
@@ -1885,25 +1885,17 @@ def run_rocket(s: SVOSSession) -> dict:
     return results
 
 
-def run_rocket_dsa(s: SVOSSession, first_result: str = None) -> str:
-    """
-    Finalizes rocket dram,dsa,vtd result.
-    If first_result is PASS, no action is needed.
-    If first_result is FAIL/UNKNOWN (or not provided), runs contention recovery:
-      killmax -> unmountsv -> rmmodsvos2 -> mountsv -> retry rocket.
-    """
-    cmd_rocket, label = ROCKET_DSA_CMD
-
-    if first_result is None:
-        _status('No previous DSA/VTD result found. Running fast path now...', 'warn')
-        first_result = _run_rocket_cmd(s, cmd_rocket, label)
-
+def run_rocket_retry(s: SVOSSession, label: str, first_result: str) -> str:
+    """Recovers SVOS and retries a failed Rocket configuration once."""
+    rocket_commands = {name: cmd for cmd, name in ROCKET_ALL_CMDS}
+    if label not in rocket_commands:
+        raise FCOStepError(f'Unknown Rocket configuration: {label}')
     if first_result == 'PASS':
-        _status('Rocket DSA/VTD fast path passed. No fallback needed.', 'ok')
         return first_result
 
+    cmd_rocket = rocket_commands[label]
     _status(
-        f'Rocket DSA/VTD fast path returned {first_result}. Running contention recovery sequence at end...',
+        f'Rocket {label} returned {first_result}. Running contention recovery sequence...',
         'warn',
     )
     for prep_cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
@@ -1915,8 +1907,8 @@ def run_rocket_dsa(s: SVOSSession, first_result: str = None) -> str:
 
     retry_result = _run_rocket_cmd(s, cmd_rocket, label)
     retest_result = f'{retry_result} (Retest)'
-    _status(f'Rocket DSA/VTD fallback result: {retest_result}', 'info')
-    _pause(f'Rocket DSA/VTD fallback retry {retest_result} — press any key to continue...')
+    _status(f'Rocket {label} fallback result: {retest_result}', 'info')
+    _pause(f'Rocket {label} fallback retry {retest_result} — press any key to continue...')
     return retest_result
 
 
@@ -3023,15 +3015,17 @@ def _open_serial(com_port: str) -> 'SVOSSession':
                            if _should_run(content, 'mlc')      else 'SKIPPED')
 
     if _should_run(content, 'rocket'):
-        dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
-        if dsa_fast != 'PASS':
-            results['rocket_dram_dsa'] = _run_safe(
-                'Rocket DSA fallback',
-                run_rocket_dsa,
-                s,
-                dsa_fast,
-                _tkey='rocket_dsa'
-            )
+        for _, label in ROCKET_ALL_CMDS:
+            first_result = results.get(label, 'FAIL')
+            if first_result not in ('PASS', 'SKIPPED'):
+                results[label] = _run_safe(
+                    f'Rocket {label} fallback',
+                    run_rocket_retry,
+                    s,
+                    label,
+                    first_result,
+                    _tkey=f'{label}_retry'
+                )
 
     try:
         run_parser(s)
@@ -3199,16 +3193,18 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
             if _should_run(content, 'rocket'):
-                dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
-                if dsa_fast != 'PASS':
-                    results['rocket_dram_dsa'] = _run_safe(
-                        'Rocket DSA fallback',
-                        run_rocket_dsa,
-                        s,
-                        dsa_fast,
-                        _tkey='rocket_dsa',
-                        _monitor_label=f'{qdf} - Rocket DSA fallback'
-                    )
+                for _, label in ROCKET_ALL_CMDS:
+                    first_result = results.get(label, 'FAIL')
+                    if first_result not in ('PASS', 'SKIPPED'):
+                        results[label] = _run_safe(
+                            f'Rocket {label} fallback',
+                            run_rocket_retry,
+                            s,
+                            label,
+                            first_result,
+                            _tkey=f'{label}_retry',
+                            _monitor_label=f'{qdf} - Rocket {label} fallback'
+                        )
 
             if has_svos_tests:
                 try:
@@ -3395,16 +3391,18 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     results['svos_boot'] = 'PASS' if has_svos_tests_r else 'SKIPPED'
 
                 if _should_run(content_r, 'rocket'):
-                    dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
-                    if dsa_fast != 'PASS':
-                        results['rocket_dram_dsa'] = _run_safe_r(
-                            'Rocket DSA fallback',
-                            run_rocket_dsa,
-                            s,
-                            dsa_fast,
-                            _tkey='rocket_dsa',
-                            _monitor_label=f'{qdf} - Retry Rocket DSA fallback'
-                        )
+                    for _, label in ROCKET_ALL_CMDS:
+                        first_result = results.get(label, 'FAIL')
+                        if first_result not in ('PASS', 'SKIPPED'):
+                            results[label] = _run_safe_r(
+                                f'Rocket {label} fallback',
+                                run_rocket_retry,
+                                s,
+                                label,
+                                first_result,
+                                _tkey=f'{label}_retry',
+                                _monitor_label=f'{qdf} - Retry Rocket {label} fallback'
+                            )
                 else:
                     results['rocket_dram_dsa'] = 'SKIPPED'
 
@@ -3569,16 +3567,18 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
     if _should_run(content, 'rocket'):
-        dsa_fast = results.get('rocket_dram_dsa', 'FAIL')
-        if dsa_fast != 'PASS':
-            results['rocket_dram_dsa'] = _run_safe(
-                'Rocket DSA fallback',
-                run_rocket_dsa,
-                s,
-                dsa_fast,
-                _tkey='rocket_dsa',
-                _monitor_label=f'{qdf} - Rocket DSA fallback'
-            )
+        for _, label in ROCKET_ALL_CMDS:
+            first_result = results.get(label, 'FAIL')
+            if first_result not in ('PASS', 'SKIPPED'):
+                results[label] = _run_safe(
+                    f'Rocket {label} fallback',
+                    run_rocket_retry,
+                    s,
+                    label,
+                    first_result,
+                    _tkey=f'{label}_retry',
+                    _monitor_label=f'{qdf} - Rocket {label} fallback'
+                )
     else:
         results['rocket_dram_dsa'] = 'SKIPPED'
 
