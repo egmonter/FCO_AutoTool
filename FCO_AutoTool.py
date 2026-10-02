@@ -151,6 +151,7 @@ MOUNTSV_TIMEOUT  = 1800  # mountsv                                 30 min
 CMD_TIMEOUT      = 120   # comandos normales                        2 min
 SC_TIMEOUT       = 600   # supercollider -M 5                      10 min
 ROCKET_TIMEOUT   = 1200  # rocket + rtm por config                 20 min
+CONTENT_MIN_RUNTIME = 240  # sc/rocket -M 5 expected runtime       4 min
 MEMIC_TIMEOUT    = 2400  # memicals                                40 min
 MLC_TIMEOUT      = 2400  # mlc                                     40 min
 SOLAR_TIMEOUT    = 1200  # solar                                   20 min
@@ -642,14 +643,29 @@ def _set_runtime_monitor_tool(tool_name: str):
 def _monitor_stage(stage_name: str):
     """Wraps a stage and reports live timing to the popup monitor."""
     mon = _get_runtime_monitor()
+    stage_status = {'value': 'DONE'}
     mon.start_stage(stage_name)
+
+    def set_status(status: str):
+        stage_status['value'] = status
+
     try:
-        yield
+        yield set_status
     except Exception:
         mon.end_stage('FAIL')
         raise
     else:
-        mon.end_stage('DONE')
+        mon.end_stage(stage_status['value'])
+
+
+def _monitor_status_for_result(result) -> str:
+    statuses = result.values() if isinstance(result, dict) else (result,)
+    normalized = [str(status).replace(' (Retest)', '').strip().upper() for status in statuses]
+    if any(status in ('FAIL', 'UNKNOWN') for status in normalized):
+        return 'FAIL'
+    if normalized and all(status == 'SKIPPED' for status in normalized):
+        return 'SKIPPED'
+    return 'DONE'
 
 
 def _pause(msg: str = 'Press any key to continue...'):
@@ -1879,10 +1895,26 @@ def _recover_svos_prompt_after_skip(s: SVOSSession, context: str) -> bool:
 
 
 def run_supercollider(s: SVOSSession) -> str:
-    _status('Running SuperCollider (sc -M 5)...', 'step')
-    s.send('sc -M 5 > sc_out.txt')
-    with _guard('SuperCollider - sc -M 5'):
-        s.read_until(SVOS_PROMPT, timeout=SC_TIMEOUT)
+    for attempt in range(1, 3):
+        _status(f'Running SuperCollider (sc -M 5), attempt {attempt}/2...', 'step')
+        started_at = time.monotonic()
+        s.send('sc -M 5 > sc_out.txt')
+        with _guard('SuperCollider - sc -M 5'):
+            s.read_until(SVOS_PROMPT, timeout=SC_TIMEOUT)
+        elapsed = time.monotonic() - started_at
+        if elapsed >= CONTENT_MIN_RUNTIME:
+            break
+        _status(
+            f'SuperCollider ended too early ({_fmt_dur(elapsed)} < '
+            f'{_fmt_dur(CONTENT_MIN_RUNTIME)}).',
+            'warn',
+        )
+        if attempt == 1:
+            _status('Retrying SuperCollider once because the execution was too short...', 'warn')
+        else:
+            _status('SuperCollider remained too short after retry; recording FAIL.', 'fail')
+            return 'FAIL'
+
     s.send('grep -i "TEST PASSED\\|TEST FAILED" sc_out.txt')
     with _guard('parse sc_out.txt'):
         _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
@@ -1895,9 +1927,19 @@ def run_supercollider(s: SVOSSession) -> str:
 def _run_rocket_cmd(s: SVOSSession, cmd: str, label: str) -> str:
     """Runs a rocket+rtm command and returns PASS/FAIL/UNKNOWN."""
     _status(f'Running Rocket: {label}...', 'step')
+    started_at = time.monotonic()
     s.send(cmd)
     with _guard(f'Rocket {label}'):
         s.read_until(SVOS_PROMPT, timeout=ROCKET_TIMEOUT)
+    elapsed = time.monotonic() - started_at
+    if elapsed < CONTENT_MIN_RUNTIME:
+        _status(
+            f'Rocket {label} ended too early ({_fmt_dur(elapsed)} < '
+            f'{_fmt_dur(CONTENT_MIN_RUNTIME)}); marking FAIL to trigger recovery and rerun.',
+            'fail',
+        )
+        return 'FAIL'
+
     txt = label + '.txt'
     s.send(f'grep -i "test status" {txt}')
     with _guard(f'parse {txt}'):
@@ -1920,20 +1962,26 @@ def run_rocket(s: SVOSSession) -> dict:
 
     # 1) CPU first
     cpu_cmd, cpu_label = ROCKET_CMDS[0]
-    with _monitor_stage(f'Rocket {cpu_label}'):
+    with _monitor_stage(f'Rocket {cpu_label}') as set_stage_status:
         results[cpu_label] = _run_rocket_cmd(s, cpu_cmd, cpu_label)
+        if results[cpu_label] != 'PASS':
+            set_stage_status('FAIL')
     _pause(f'Rocket {cpu_label} {results[cpu_label]} — press any key to continue...')
 
     # 2) DSA/VTD fast path in the middle (no recovery sequence here)
     dsa_cmd, dsa_label = ROCKET_DSA_CMD
-    with _monitor_stage(f'Rocket {dsa_label}'):
+    with _monitor_stage(f'Rocket {dsa_label}') as set_stage_status:
         results[dsa_label] = _run_rocket_cmd(s, dsa_cmd, dsa_label)
+        if results[dsa_label] != 'PASS':
+            set_stage_status('FAIL')
     _pause(f'Rocket DSA/VTD fast path {results[dsa_label]} — press any key to continue...')
 
     # 3) IAX last among base Rocket configs
     iax_cmd, iax_label = ROCKET_CMDS[1]
-    with _monitor_stage(f'Rocket {iax_label}'):
+    with _monitor_stage(f'Rocket {iax_label}') as set_stage_status:
         results[iax_label] = _run_rocket_cmd(s, iax_cmd, iax_label)
+        if results[iax_label] != 'PASS':
+            set_stage_status('FAIL')
     _pause(f'Rocket {iax_label} {results[iax_label]} — press any key to continue...')
 
     return results
@@ -3200,8 +3248,9 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 t0 = time.time()
                 try:
                     if _monitor_label:
-                        with _monitor_stage(_monitor_label):
+                        with _monitor_stage(_monitor_label) as set_stage_status:
                             result = fn(*args)
+                            set_stage_status(_monitor_status_for_result(result))
                     else:
                         result = fn(*args)
                 except StepSkippedError as e:
@@ -3228,8 +3277,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
             if _should_run(content, 'rocket'):
                 rocket_res = _run_safe('Rocket suite', run_rocket, s,
-                                       _tkey='rocket_cpu_iax',
-                                       _monitor_label=f'{qdf} - Rocket suite')
+                                       _tkey='rocket_cpu_iax')
                 if isinstance(rocket_res, dict):
                     results.update(rocket_res)
                 else:
@@ -3410,8 +3458,9 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     t0 = time.time()
                     try:
                         if _monitor_label:
-                            with _monitor_stage(_monitor_label):
+                            with _monitor_stage(_monitor_label) as set_stage_status:
                                 result = fn(*args)
+                                set_stage_status(_monitor_status_for_result(result))
                         else:
                             result = fn(*args)
                     except StepSkippedError as e:
@@ -3438,8 +3487,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
 
                 if _should_run(content_r, 'rocket'):
                     rocket_res = _run_safe_r('Rocket cpu/dsa-vtd/iax', run_rocket, s,
-                                             _tkey='rocket_cpu_iax',
-                                             _monitor_label=f'{qdf} - Retry Rocket cpu/dsa-vtd/iax')
+                                             _tkey='rocket_cpu_iax')
                     if isinstance(rocket_res, dict):
                         results.update(rocket_res)
                     else:
@@ -3603,8 +3651,9 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         t0 = time.time()
         try:
             if _monitor_label:
-                with _monitor_stage(_monitor_label):
+                with _monitor_stage(_monitor_label) as set_stage_status:
                     result = fn(*args)
+                    set_stage_status(_monitor_status_for_result(result))
             else:
                 result = fn(*args)
         except StepSkippedError as e:
@@ -3631,8 +3680,7 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
 
     if _should_run(content, 'rocket'):
         rocket_res = _run_safe('Rocket cpu/dsa-vtd/iax', run_rocket, s,
-                               _tkey='rocket_cpu_iax',
-                               _monitor_label=f'{qdf} - Rocket cpu/dsa-vtd/iax')
+                               _tkey='rocket_cpu_iax')
         if isinstance(rocket_res, dict):
             results.update(rocket_res)
         else:
