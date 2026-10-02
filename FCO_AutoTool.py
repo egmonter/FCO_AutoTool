@@ -52,6 +52,10 @@ class BiosTimeoutError(FCOStepError):
     """BIOS screen did not appear within the expected time — retryable via power cycle."""
     pass
 
+class StepSkippedError(FCOStepError):
+    """The operator skipped the currently waiting step."""
+    pass
+
 class BootscriptError(FCOStepError):
     """sv_automation reported a bootscript/overwrite failure — retryable via power cycle."""
     pass
@@ -221,6 +225,7 @@ def _enable_no_kill_time_mode():
     for key in timeout_keys:
         globals()[key] = None
     _status('Validation mode active: timeout kills disabled (No Kill Time).', 'warn')
+    _status("Press 'S' or 's' to skip the current blocked step.", 'info')
 
 
 def _ask_runtime_profile():
@@ -316,7 +321,9 @@ CONTENT_CMDS = {
 def _wait_for_file(filepath, poll: float = 10):
     """Waits indefinitely until the file exists."""
     while not Path(filepath).exists():
-        time.sleep(poll)
+        if NO_KILL_TIME and _check_skip_key():
+            raise StepSkippedError(f'Waiting for {Path(filepath).name}')
+        time.sleep(min(poll, 1) if NO_KILL_TIME else poll)
 
 
 def _wait_for_any_file(filepaths, poll: float = 1.0):
@@ -326,7 +333,9 @@ def _wait_for_any_file(filepaths, poll: float = 1.0):
         for path in paths:
             if path.exists():
                 return path
-        time.sleep(poll)
+        if NO_KILL_TIME and _check_skip_key():
+            raise StepSkippedError('Waiting for automation signal file')
+        time.sleep(min(poll, 1) if NO_KILL_TIME else poll)
 
 
 def _wait_for_file_timeout(filepath, poll: float = 5, timeout: float = 60) -> bool:
@@ -846,7 +855,7 @@ def setup_logging(log_file):
 
 def _check_skip_key():
     """
-    Checks if user pressed 's'/'S' to skip BIOS wait timeout.
+    Checks if user pressed 's'/'S' to skip the current wait.
     Returns True only for 's' or 'S'.
     Only works on Windows with msvcrt.
     """
@@ -856,10 +865,19 @@ def _check_skip_key():
     if msvcrt.kbhit():
         key = msvcrt.getch()
         if key in (b's', b'S'):
-            _status("[USER SKIP] BIOS wait interrupted by 's'", 'step')
+            _status("[USER SKIP] Current wait interrupted by 's'", 'step')
             return True
     
     return False
+
+
+def _raise_if_validation_skip(s: 'SVOSSession', step_desc: str, probe: bool = False):
+    if NO_KILL_TIME and not probe and _check_skip_key():
+        try:
+            s.send_key(b'\x03')
+        except Exception:
+            pass
+        raise StepSkippedError(f'Skipped current step: {step_desc}')
 
 
 def _capture_serial_tail(s, max_seconds: float = EFI_SERIAL_TAIL_MAX,
@@ -1013,6 +1031,7 @@ class SVOSSession:
                 return out
             if deadline and time.time() > deadline:
                 raise TimeoutError(f'Timeout ({timeout}s) waiting for: {expected!r}')
+            _raise_if_validation_skip(self, f'waiting for {expected!r}', probe=probe)
             time.sleep(0.05)
 
     def read_until_any(self, patterns, timeout=CMD_TIMEOUT, probe: bool = False):
@@ -1033,6 +1052,7 @@ class SVOSSession:
                     return p, out
             if deadline and time.time() > deadline:
                 raise TimeoutError(f'Timeout ({timeout}s) waiting for patterns: {patterns}')
+            _raise_if_validation_skip(self, 'waiting for serial prompt', probe=probe)
             time.sleep(0.05)
 
     def flush(self):
@@ -1154,6 +1174,8 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int | None, enable_nudge:
 
     while True:
         if _check_skip_key():
+            if NO_KILL_TIME:
+                raise StepSkippedError('Waiting for BIOS screen')
             raise BiosTimeoutError("BIOS screen wait skipped by user pressing 's'")
 
         if deadline is None:
@@ -1194,6 +1216,7 @@ def _break_internal_shell_countdown(s: SVOSSession, timeout: int = INT_SHELL_COU
     deadline = time.time() + timeout
 
     while time.time() < deadline:
+        _raise_if_validation_skip(s, 'waiting for EFI Shell countdown')
         chunk = s.ser.read(512)
         if chunk:
             s.buf += chunk
@@ -1234,6 +1257,7 @@ def _read_until_any_with_periodic_enter(s: SVOSSession, patterns, timeout=SVOS_T
                 out, s.buf = s.buf, b''
                 return p, out
 
+        _raise_if_validation_skip(s, 'waiting for boot prompt', probe=probe)
         now = time.time()
         if deadline is not None and now > deadline:
             raise TimeoutError(f'Timeout ({timeout}s) waiting for patterns: {patterns}')
@@ -1404,37 +1428,43 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             t_root = _timing('ATTENTION -> first root@ prompt', since=t_attention)
             s.send('login')
 
-            # 8. Login: wait for generic "<hostname> login:" prompt, then send credentials.
-            # Some platforms redraw slowly; if the first wait times out, send ENTER and retry once.
+            # 8. Some images are already at an authenticated root shell after boot.
+            login_patterns = SVOS_LOGIN_PROMPTS + [SVOS_PROMPT]
             if NO_KILL_TIME:
-                with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
-                    _read_until_any_with_periodic_enter(
+                try:
+                    matched_login, _ = _read_until_any_with_periodic_enter(
                         s,
-                        SVOS_LOGIN_PROMPTS,
+                        login_patterns,
                         timeout=None,
                         enter_every=10,
-                        tick_msg='Still waiting SVOS login prompt (No Kill Time), sending ENTER...'
+                        tick_msg='Still waiting for SVOS login or root prompt (No Kill Time), sending ENTER...'
                     )
+                except StepSkippedError:
+                    if not _recover_svos_prompt_after_skip(s, 'SVOS login'):
+                        raise
+                    matched_login = SVOS_PROMPT
             else:
                 try:
-                    s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
+                    matched_login, _ = s.read_until_any(login_patterns, timeout=20)
                 except TimeoutError:
                     _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
                     s.send_enter()
                     with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
-                        s.read_until_any(SVOS_LOGIN_PROMPTS, timeout=20)
+                        matched_login, _ = s.read_until_any(login_patterns, timeout=20)
 
-            _status('Entering user: root', 'step')
-            s.send('root')
+            if matched_login == SVOS_PROMPT:
+                _status('SVOS is already at the authenticated root shell; skipping login credentials.', 'ok')
+            else:
+                _status('Entering user: root', 'step')
+                s.send('root')
 
-            with _guard('prompt "Password:"'):
-                s.read_until_any(['Password:', 'password:'], timeout=30)
-            _status('Entering password...', 'step')
-            s.send('svos')
+                with _guard('prompt "Password:"'):
+                    s.read_until_any(['Password:', 'password:'], timeout=30)
+                _status('Entering password...', 'step')
+                s.send('svos')
 
-            # 9. Wait for the root@... prompt (authenticated session)
-            with _guard('successful login - verify user/password (root/svos)'):
-                s.read_until(SVOS_PROMPT, timeout=30)
+                with _guard('successful login - verify user/password (root/svos)'):
+                    s.read_until(SVOS_PROMPT, timeout=30)
             _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
             _timing('SVOS login complete', since=t_root)
 
@@ -1482,6 +1512,8 @@ def boot_centos_direct(s: SVOSSession):
         _status('CentOS validated with ifconfig.', 'ok')
         return 'PASS'
         
+    except StepSkippedError:
+        raise
     except Exception as e:
         _status(f'CentOS Direct login FAILED: {e}', 'fail')
         logging.error(f'CentOS direct login failed: {e}', exc_info=True)
@@ -1548,6 +1580,7 @@ def _wait_for_centos_login_or_conditional(s: SVOSSession,
     next_enter = (start + enter_every) if enter_every > 0 else None
 
     while True:
+        _raise_if_validation_skip(s, 'waiting for CentOS login prompt')
         chunk = s.ser.read(512)
         if chunk:
             s.buf += chunk
@@ -1756,6 +1789,8 @@ def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
                 attempt_desc = step_desc if attempt == 0 else f'{step_desc} (retry {attempt}/{retries})'
                 with _guard(attempt_desc):
                     return s.read_until(SVOS_PROMPT, timeout=timeout)
+            except StepSkippedError:
+                raise
             except FCOStepError as e:
                 last_err = e
                 if attempt >= retries:
@@ -1816,12 +1851,28 @@ def _recover_svos_prompt_after_timeout(s: SVOSSession, context: str,
                 s.read_until(SVOS_PROMPT, timeout=prompt_timeout)
             _status(f'{context}: SVOS prompt recovered.', 'ok')
             return True
+        except StepSkippedError:
+            raise
         except Exception as e:
             _status(f'Recovery attempt {attempt}/{attempts} failed: {e}', 'warn')
             time.sleep(0.4)
 
     _status(f'{context}: could not recover SVOS prompt after timeout.', 'fail')
     return False
+
+
+def _recover_svos_prompt_after_skip(s: SVOSSession, context: str) -> bool:
+    _status(f'{context}: skip requested. Checking for an SVOS prompt...', 'warn')
+    try:
+        s.send_key(b'\x03')
+        time.sleep(0.2)
+        s.send_enter()
+        s.read_until(SVOS_PROMPT, timeout=5, probe=True)
+        _status(f'{context}: SVOS prompt recovered after skip.', 'ok')
+        return True
+    except Exception as e:
+        _status(f'{context}: no SVOS prompt after skip: {e}', 'fail')
+        return False
 
 
 def run_supercollider(s: SVOSSession) -> str:
@@ -1992,6 +2043,8 @@ def run_svos_boot_check(s: SVOSSession) -> str:
             s.read_until(SVOS_PROMPT, timeout=SVOSINFO_TIMEOUT)
         _status('SVOS boot validation successful (svosinfo responded).', 'ok')
         return 'PASS'
+    except StepSkippedError:
+        raise
     except Exception as e:
         _status(f'SVOS boot validation FAILED: {e}', 'fail')
         logging.error(f'SVOS boot validation failed: {e}', exc_info=True)
@@ -2029,9 +2082,10 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
             return v
         return v.replace(' (Retest)', '').strip()
 
-    overall = 'PASS' if all(_base_result(v) == 'PASS'
-                            for v in results.values()
-                            if _base_result(v) != 'SKIPPED') else 'FAIL'
+    evaluated = [_base_result(v) for v in results.values()
+                 if _base_result(v) != 'SKIPPED']
+    overall = ('SKIPPED' if not evaluated else
+               'PASS' if all(value == 'PASS' for value in evaluated) else 'FAIL')
 
     # Column widths for the content table
     NAME_W = 20
@@ -2256,7 +2310,9 @@ def wait_for_signal(sig_file: Path, poll=10):
     """Waits indefinitely until the signal arrives."""
     logging.info(f'Waiting for signal: {sig_file.name} ...')
     while not sig_file.exists():
-        time.sleep(poll)
+        if NO_KILL_TIME and _check_skip_key():
+            raise StepSkippedError(f'Waiting for signal {sig_file.name}')
+        time.sleep(min(poll, 1) if NO_KILL_TIME else poll)
     logging.info(f'Signal received: {sig_file.name}')
 
 
@@ -2978,6 +3034,11 @@ def _open_serial(com_port: str) -> 'SVOSSession':
         t0 = time.time()
         try:
             result = fn(*args)
+        except StepSkippedError as e:
+            _status(f'{name} skipped by user: {e}', 'warn')
+            if not _recover_svos_prompt_after_skip(s, name):
+                raise
+            result = 'SKIPPED'
         except Exception as e:
             _status(f'{name} FAILED: {e}', 'fail')
             logging.error(f'{name} failed for {qdf}: {e}', exc_info=True)
@@ -2999,9 +3060,9 @@ def _open_serial(com_port: str) -> 'SVOSSession':
         if isinstance(rocket_res, dict):
             results.update(rocket_res)
         else:
-            for _, label in ROCKET_CMDS:
-                results[label] = 'FAIL'
-            results['rocket_dram_dsa'] = 'FAIL'
+            skip_result = 'SKIPPED' if rocket_res == 'SKIPPED' else 'FAIL'
+            for _, label in ROCKET_ALL_CMDS:
+                results[label] = skip_result
     else:
         for _, label in ROCKET_CMDS:
             results[label] = 'SKIPPED'
@@ -3140,6 +3201,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                             result = fn(*args)
                     else:
                         result = fn(*args)
+                except StepSkippedError as e:
+                    _status(f'{name} skipped by user: {e}', 'warn')
+                    if not _recover_svos_prompt_after_skip(s, name):
+                        raise
+                    result = 'SKIPPED'
                 except Exception as e:
                     _status(f'{name} FAILED: {e}', 'fail')
                     logging.error(f'{name} failed for {qdf}: {e}', exc_info=True)
@@ -3164,9 +3230,9 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 if isinstance(rocket_res, dict):
                     results.update(rocket_res)
                 else:
-                    for _, label in ROCKET_CMDS:
-                        results[label] = 'FAIL'
-                    results['rocket_dram_dsa'] = 'FAIL'
+                    skip_result = 'SKIPPED' if rocket_res == 'SKIPPED' else 'FAIL'
+                    for _, label in ROCKET_ALL_CMDS:
+                        results[label] = skip_result
             else:
                 for _, label in ROCKET_CMDS:
                     results[label] = 'SKIPPED'
@@ -3254,6 +3320,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 entry['timing_total'] = timing_total
             all_results.append(entry)
 
+        except StepSkippedError as e:
+            _status(f'QDF {qdf}: skipped by user; continuing with the next QDF.', 'warn')
+            logging.info(f'QDF {qdf} skipped by user: {e}')
+            all_results.append({'qdf': qdf, 'overall': 'SKIPPED_BY_USER', 'log': str(e)})
+
         except (MountsvTimeoutError, BiosTimeoutError, BootscriptError) as e:
             reason = type(e).__name__
             _status(f'QDF {qdf}: {reason} — will be added to the retry queue', 'fail')
@@ -3340,6 +3411,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                                 result = fn(*args)
                         else:
                             result = fn(*args)
+                    except StepSkippedError as e:
+                        _status(f'{name} skipped by user: {e}', 'warn')
+                        if not _recover_svos_prompt_after_skip(s, name):
+                            raise
+                        result = 'SKIPPED'
                     except Exception as e:
                         _status(f'{name} FAILED: {e}', 'fail')
                         logging.error(f'[RETRY] {name} failed for {qdf}: {e}', exc_info=True)
@@ -3364,8 +3440,9 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     if isinstance(rocket_res, dict):
                         results.update(rocket_res)
                     else:
-                        for _, label in ROCKET_CMDS:
-                            results[label] = 'FAIL'
+                        skip_result = 'SKIPPED' if rocket_res == 'SKIPPED' else 'FAIL'
+                        for _, label in ROCKET_ALL_CMDS:
+                            results[label] = skip_result
                 else:
                     for _, label in ROCKET_CMDS:
                         results[label] = 'SKIPPED'
@@ -3431,6 +3508,13 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                             r['timing_total'] = timing_total_r
                         break
 
+            except StepSkippedError as e:
+                _status(f'RETRY QDF {qdf} skipped by user: {e}', 'warn')
+                for r in all_results:
+                    if r['qdf'] == qdf:
+                        r['overall'] = 'RETRY_SKIPPED_BY_USER'
+                        break
+
             except (MountsvTimeoutError, BiosTimeoutError) as e:
                 _status(f'RETRY QDF {qdf} failed again ({type(e).__name__}): {e}', 'fail')
                 logging.error(f'[RETRY] {type(e).__name__} in QDF {qdf}: {e}')
@@ -3492,17 +3576,21 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     has_svos_tests = _has_svos_content(content)
 
     if needs_svos:
-        if skip_boot:
-            _status('Skip boot enabled: validating current SVOS prompt...', 'info')
-            if _is_svos_prompt_ready(s):
-                _status('SVOS prompt detected. Continuing without boot.', 'ok')
+        try:
+            if skip_boot:
+                _status('Skip boot enabled: validating current SVOS prompt...', 'info')
+                if _is_svos_prompt_ready(s):
+                    _status('SVOS prompt detected. Continuing without boot.', 'ok')
+                else:
+                    _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
+                    boot_svos(s, fused_nudge=(mode in (2, 3)))
             else:
-                _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
                 boot_svos(s, fused_nudge=(mode in (2, 3)))
-        else:
-            boot_svos(s, fused_nudge=(mode in (2, 3)))
-        if has_svos_tests:
-            setup_fco_dir(s, qdf, week)
+            if has_svos_tests:
+                setup_fco_dir(s, qdf, week)
+        except StepSkippedError as e:
+            _status(f'Fused QDF {qdf} skipped by user during boot/setup: {e}', 'warn')
+            return None, 'SKIPPED_BY_USER', {}
     else:
         _status('CentOS-only content: skipping SVOS boot.', 'info')
 
@@ -3516,6 +3604,11 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
                     result = fn(*args)
             else:
                 result = fn(*args)
+        except StepSkippedError as e:
+            _status(f'{name} skipped by user: {e}', 'warn')
+            if not _recover_svos_prompt_after_skip(s, name):
+                raise
+            result = 'SKIPPED'
         except Exception as e:
             _status(f'{name} FAILED: {e}', 'fail')
             logging.error(f'{name} failed for fused QDF {qdf}: {e}', exc_info=True)
@@ -3540,8 +3633,9 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         if isinstance(rocket_res, dict):
             results.update(rocket_res)
         else:
-            for _, label in ROCKET_CMDS:
-                results[label] = 'FAIL'
+            skip_result = 'SKIPPED' if rocket_res == 'SKIPPED' else 'FAIL'
+            for _, label in ROCKET_ALL_CMDS:
+                results[label] = skip_result
     else:
         for _, label in ROCKET_CMDS:
             results[label] = 'SKIPPED'
@@ -3661,6 +3755,8 @@ def _wait_for_sv_done_with_progress(qdf: str, sv_done: Path, sv_progress: Path):
     current_stage_name = None
 
     while not sv_done.exists():
+        if NO_KILL_TIME and _check_skip_key():
+            raise StepSkippedError(f'Waiting for overwrite completion for {qdf}')
         marker = None
         if sv_progress.exists():
             try:
@@ -4763,6 +4859,11 @@ def main():
 
     except KeyboardInterrupt:
         logging.warning('Interrupted by the user.')
+    except StepSkippedError as e:
+        logging.info(f'Workflow step skipped by user: {e}')
+        _status(f'Workflow stopped at user skip: {e}', 'warn')
+        current_qdf = locals().get('qdf_fused') or locals().get('qdf') or 'current QDF'
+        all_results.append({'qdf': current_qdf, 'overall': 'SKIPPED_BY_USER', 'log': str(e)})
     except Exception as e:
         logging.error(f'Error inesperado: {e}', exc_info=True)
         print(f'\n[!!] UNEXPECTED ERROR: {e}')
