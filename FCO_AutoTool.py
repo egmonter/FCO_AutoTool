@@ -1270,7 +1270,8 @@ def _read_until_any_with_periodic_enter(s: SVOSSession, patterns, timeout=SVOS_T
         time.sleep(0.05)
 
 
-def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False):
+def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False,
+              auto_skip_login: bool = False):
     """
     Secuencia completa de arranque:
       BIOS (OAKSTREAM) -> Boot Manager Menu -> UEFI Internal Shell
@@ -1429,7 +1430,9 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             s.send('login')
 
             # 8. Some images are already at an authenticated root shell after boot.
-            login_patterns = SVOS_LOGIN_PROMPTS + [SVOS_PROMPT]
+            login_patterns = list(SVOS_LOGIN_PROMPTS)
+            if auto_skip_login:
+                login_patterns.append(SVOS_PROMPT)
             if NO_KILL_TIME:
                 try:
                     matched_login, _ = _read_until_any_with_periodic_enter(
@@ -3178,10 +3181,10 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                         _status('SVOS prompt detected. Continuing without boot.', 'ok')
                     else:
                         _status('SVOS prompt not detected. Falling back to normal boot flow.', 'warn')
-                        boot_svos(s, fused_nudge=(mode == 4))
+                        boot_svos(s, fused_nudge=(mode == 4), auto_skip_login=(mode == 1))
                     skip_boot_once = False
                 else:
-                    boot_svos(s, fused_nudge=(mode == 4))
+                    boot_svos(s, fused_nudge=(mode == 4), auto_skip_login=(mode == 1))
                 if has_svos_tests:
                     setup_fco_dir(s, qdf, week)
             else:
@@ -3393,7 +3396,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 )
                 t0_boot_r = time.time()
                 if needs_svos_r:
-                    boot_svos(s, fused_nudge=(mode == 4))
+                    boot_svos(s, fused_nudge=(mode == 4), auto_skip_login=(mode == 1))
                     if has_svos_tests_r:
                         setup_fco_dir(s, qdf, week)
                 else:
