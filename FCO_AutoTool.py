@@ -922,6 +922,9 @@ def _sanitize_log_token(value: str) -> str:
 # Serial helper
 # ---------------------------------------------------------------------------
 
+_ANSI_RE = re.compile(r'\x1b(?:\[[0-9;?]*[A-Za-z]|\([A-Za-z0-9])')
+
+
 class SVOSSession:
     """Wraps pyserial with read_until / send helpers."""
 
@@ -931,6 +934,17 @@ class SVOSSession:
         self.log     = logging.getLogger('serial')
         self.buf     = b''
         self._capture_stack = []
+        self._live_log = None
+        try:
+            SERIAL_SEGMENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            live_path = SERIAL_SEGMENT_LOG_DIR / f'live_{_sanitize_log_token(port)}.log'
+            self._live_log = open(live_path, 'w', encoding='utf-8')
+            self._live_log.write(f'Live serial log - {port} - started '
+                                 f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n{"-" * 70}\n')
+            self._live_log.flush()
+        except Exception as e:
+            logging.warning(f'Could not open live serial log: {e}')
+            self._live_log = None
 
     def begin_serial_capture(self, phase_name: str):
         """Starts a serial transcript capture for a specific boot phase."""
@@ -962,13 +976,22 @@ class SVOSSession:
         return out
 
     def _capture_text(self, text: str):
-        if not text or not self._capture_stack:
+        if not text:
+            return
+        if self._live_log is not None:
+            try:
+                self._live_log.write(_ANSI_RE.sub('', text))
+                self._live_log.flush()
+            except Exception:
+                self._live_log = None
+        if not self._capture_stack:
             return
         for capture in self._capture_stack:
             capture['parts'].append(text)
 
     def _capture_tx(self, text: str):
-        self._capture_text(f'\n[TX] {text}\n')
+        stamp = datetime.datetime.now().strftime('%H:%M:%S')
+        self._capture_text(f'\n[TX {stamp}] {text}\n')
 
     def send_arrow_down(self):
         """Sends the down arrow key (ANSI escape)."""
@@ -1081,6 +1104,12 @@ class SVOSSession:
         global _ACTIVE_SERIAL_SESSION
         if _ACTIVE_SERIAL_SESSION is self:
             _ACTIVE_SERIAL_SESSION = None
+        if self._live_log is not None:
+            try:
+                self._live_log.close()
+            except Exception:
+                pass
+            self._live_log = None
         self.ser.close()
 
     def _print(self, data: bytes):
