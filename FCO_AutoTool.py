@@ -2055,8 +2055,8 @@ def run_rocket_retry(s: SVOSSession, failed_labels: list) -> dict:
     """Runs the contention recovery sequence once, then retests each failed Rocket."""
     rocket_commands = {name: cmd for cmd, name in ROCKET_ALL_CMDS}
     _status(f'Rocket failed: {", ".join(failed_labels)}. Running contention recovery sequence once...', 'warn')
-    with _monitor_stage('Rocket recovery (killmax/unmountsv/rmmodsvos2/mountsv)'):
-        for prep_cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
+    with _monitor_stage('Rocket recovery (killmax/umountsv/rmmodsvos2/mountsv)'):
+        for prep_cmd in ['killmax', 'umountsv', 'rmmodsvos2', 'mountsv']:
             _status(f'  Running {prep_cmd}...', 'info')
             started_at = time.monotonic()
             t = MOUNTSV_TIMEOUT if prep_cmd == 'mountsv' else CMD_TIMEOUT
