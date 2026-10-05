@@ -1494,12 +1494,13 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
 
             # 10. Run mountsv and wait for the prompt to return
             _status('Running mountsv...', 'step')
-            s.send('mountsv')
             t_mountsv = time.time()
             try:
-                s.read_until(SVOS_PROMPT, timeout=MOUNTSV_TIMEOUT)
+                _, mountsv_rc = _run_svos_sync(s, 'mountsv', MOUNTSV_TIMEOUT, 'mountsv')
             except TimeoutError:
                 raise MountsvTimeoutError(f'mountsv did not respond within {MOUNTSV_TIMEOUT//60} min')
+            if mountsv_rc != 0:
+                _status(f'mountsv returned rc={mountsv_rc}; check the serial log.', 'warn')
             _status('mountsv completed. SVOS mounted successfully.', 'ok')
             _timing('mountsv complete', since=t_mountsv)
         finally:
@@ -1795,60 +1796,73 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False,
 # ---------------------------------------------------------------------------
 
 
+_SYNC_COUNTER = 0
+
+
+def _run_svos_sync(s: SVOSSession, cmd: str, timeout, step_desc: str):
+    """Runs a shell command and waits for a unique completion marker. Returns (output, exit_code)."""
+    global _SYNC_COUNTER
+    _SYNC_COUNTER += 1
+    tag = f'FCO_SYNC_{_SYNC_COUNTER}'
+    # Quotes split the tag so the echoed command line never matches the pattern.
+    pattern = re.compile(rf'{tag}_rc=(\d+)'.encode())
+    s.flush()
+    s.send(f'{cmd}; echo "{tag[:3]}""{tag[3:]}_rc=$?"')
+    if NO_KILL_TIME:
+        timeout = None
+    deadline = (time.time() + timeout) if timeout is not None else None
+    while True:
+        chunk = s.ser.read(512)
+        if chunk:
+            s.buf += chunk
+            s._print(chunk)
+        m = pattern.search(s.buf)
+        if m:
+            out = s.buf[:m.start()]
+            s.buf = s.buf[m.end():]
+            return out, int(m.group(1))
+        if deadline is not None and time.time() > deadline:
+            raise TimeoutError(f'Timeout ({timeout}s) waiting for: {step_desc}')
+        _raise_if_validation_skip(s, step_desc)
+        time.sleep(0.05)
+
+
 def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
     """Creates and enters the working directory for the QDF."""
     work_dir = f'/root/FCO/FCO_WW{week}/{qdf}'
 
-    def _read_svos_prompt_resilient(step_desc: str, timeout: int = CMD_TIMEOUT,
-                                    retries: int = 1, retry_sleep: float = 0.5) -> bytes:
-        """Reads until SVOS prompt, retrying automatically with ENTER on transient stalls."""
-        last_err = None
-        for attempt in range(retries + 1):
-            try:
-                attempt_desc = step_desc if attempt == 0 else f'{step_desc} (retry {attempt}/{retries})'
-                with _guard(attempt_desc):
-                    return s.read_until(SVOS_PROMPT, timeout=timeout)
-            except StepSkippedError:
-                raise
-            except FCOStepError as e:
-                last_err = e
-                if attempt >= retries:
-                    break
-                _status(
-                    f'{step_desc}: prompt timeout/stall. Sending ENTER and retrying ({attempt + 1}/{retries})...',
-                    'warn'
-                )
-                s.send_enter()
-                time.sleep(retry_sleep)
-        raise last_err
-
-    _status('Checking SVOS prompt responsiveness before directory setup...', 'wait')
-    _read_svos_prompt_resilient('validar prompt SVOS antes de crear directorio', timeout=30, retries=1)
+    _status('Checking SVOS shell responsiveness before directory setup...', 'wait')
+    try:
+        _run_svos_sync(s, 'true', 30, 'SVOS shell responsiveness')
+    except TimeoutError:
+        _status('SVOS shell did not respond. Sending ENTER and retrying...', 'warn')
+        s.send_enter()
+        with _guard('SVOS shell responsiveness (retry)'):
+            _run_svos_sync(s, 'true', 60, 'SVOS shell responsiveness (retry)')
 
     _status(f'Creating directory: {work_dir}', 'step')
-    s.send(f'mkdir -p {work_dir} && cd {work_dir}')
-    out_dir = _read_svos_prompt_resilient(f'crear/entrar a {work_dir}', timeout=CMD_TIMEOUT, retries=1)
+    with _guard(f'crear/entrar a {work_dir}'):
+        _, rc = _run_svos_sync(s, f'mkdir -p {work_dir} && cd {work_dir}', CMD_TIMEOUT,
+                               f'crear/entrar a {work_dir}')
+    if rc != 0:
+        raise FCOStepError(f'mkdir/cd failed (rc={rc}): {work_dir}')
 
-    # Confirm the shell really moved to the expected directory.
-    if work_dir.encode() not in out_dir:
-        _status('Directory change not confirmed in command output. Verifying with pwd...', 'warn')
-        s.send('pwd')
-        out_pwd = _read_svos_prompt_resilient('verificar working dir con pwd', timeout=CMD_TIMEOUT, retries=1)
-        if work_dir.encode() not in out_pwd:
-            _status('pwd mismatch. Re-entering target directory once...', 'warn')
-            s.send(f'cd {work_dir}; pwd')
-            out_cd = _read_svos_prompt_resilient('reingresar y verificar working dir', timeout=CMD_TIMEOUT, retries=1)
-            if work_dir.encode() not in out_cd:
-                raise FCOStepError(f'Could not confirm working directory: {work_dir}')
+    with _guard('verificar working dir'):
+        _, rc = _run_svos_sync(s, f'[ "$PWD" = "{work_dir}" ]', CMD_TIMEOUT, 'verificar working dir')
+    if rc != 0:
+        raise FCOStepError(f'Could not confirm working directory: {work_dir}')
 
     # Copy required files for MLC from FCO_Scripts
     _status('Copying mlc and datapattern from ~/FCO_Scripts ...', 'step')
     for f in ['mlc', 'datapattern_halfA_half5.txt']:
-        s.send(f'cp ~/FCO_Scripts/{f} .')
-        _read_svos_prompt_resilient(f'copy {f} - verify it exists in ~/FCO_Scripts/', timeout=CMD_TIMEOUT, retries=1)
-        _status(f'  {f} copied', 'info')
-    s.send('chmod +x mlc')
-    _read_svos_prompt_resilient('chmod mlc', timeout=CMD_TIMEOUT, retries=1)
+        with _guard(f'copy {f}'):
+            _, rc = _run_svos_sync(s, f'cp ~/FCO_Scripts/{f} .', CMD_TIMEOUT, f'copy {f}')
+        if rc == 0:
+            _status(f'  {f} copied', 'info')
+        else:
+            _status(f'  Could not copy {f} (rc={rc}) - verify it exists in ~/FCO_Scripts/', 'warn')
+    with _guard('chmod mlc'):
+        _run_svos_sync(s, 'chmod +x mlc', CMD_TIMEOUT, 'chmod mlc')
 
     _pause('Setup ready — validate the directory in Raritan and press any key to start tests...')
 
@@ -1928,9 +1942,8 @@ def _run_rocket_cmd(s: SVOSSession, cmd: str, label: str) -> str:
     """Runs a rocket+rtm command and returns PASS/FAIL/UNKNOWN."""
     _status(f'Running Rocket: {label}...', 'step')
     started_at = time.monotonic()
-    s.send(cmd)
     with _guard(f'Rocket {label}'):
-        s.read_until(SVOS_PROMPT, timeout=ROCKET_TIMEOUT)
+        _run_svos_sync(s, cmd, ROCKET_TIMEOUT, f'Rocket {label}')
     elapsed = time.monotonic() - started_at
     if elapsed < CONTENT_MIN_RUNTIME:
         _status(
@@ -1941,9 +1954,8 @@ def _run_rocket_cmd(s: SVOSSession, cmd: str, label: str) -> str:
         return 'FAIL'
 
     txt = label + '.txt'
-    s.send(f'grep -i "test status" {txt}')
     with _guard(f'parse {txt}'):
-        _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
+        buf, _ = _run_svos_sync(s, f'grep -i "test status" {txt}', CMD_TIMEOUT, f'parse {txt}')
     result = 'PASS' if b'PASS' in buf.upper() else ('FAIL' if b'FAIL' in buf.upper() else 'UNKNOWN')
     _status(f'Rocket {label}: {result}', 'ok' if result == 'PASS' else 'fail')
     return result
@@ -1987,31 +1999,42 @@ def run_rocket(s: SVOSSession) -> dict:
     return results
 
 
-def run_rocket_retry(s: SVOSSession, label: str, first_result: str) -> str:
-    """Recovers SVOS and retries a failed Rocket configuration once."""
+def _failed_rocket_labels(results: dict) -> list:
+    return [label for _, label in ROCKET_ALL_CMDS
+            if results.get(label, 'FAIL') not in ('PASS', 'SKIPPED')]
+
+
+def run_rocket_retry(s: SVOSSession, failed_labels: list) -> dict:
+    """Runs the contention recovery sequence once, then retests each failed Rocket."""
     rocket_commands = {name: cmd for cmd, name in ROCKET_ALL_CMDS}
-    if label not in rocket_commands:
-        raise FCOStepError(f'Unknown Rocket configuration: {label}')
-    if first_result == 'PASS':
-        return first_result
+    _status(f'Rocket failed: {", ".join(failed_labels)}. Running contention recovery sequence once...', 'warn')
+    with _monitor_stage('Rocket recovery (killmax/unmountsv/rmmodsvos2/mountsv)'):
+        for prep_cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
+            _status(f'  Running {prep_cmd}...', 'info')
+            started_at = time.monotonic()
+            t = MOUNTSV_TIMEOUT if prep_cmd == 'mountsv' else CMD_TIMEOUT
+            with _guard(f'{prep_cmd}'):
+                _, rc = _run_svos_sync(s, prep_cmd, t, prep_cmd)
+            _status(f'  {prep_cmd} done in {_fmt_dur(time.monotonic() - started_at)} (rc={rc}).', 'info')
 
-    cmd_rocket = rocket_commands[label]
-    _status(
-        f'Rocket {label} returned {first_result}. Running contention recovery sequence...',
-        'warn',
-    )
-    for prep_cmd in ['killmax', 'unmountsv', 'rmmodsvos2', 'mountsv']:
-        _status(f'  Running {prep_cmd}...', 'info')
-        s.send(prep_cmd)
-        t = MOUNTSV_TIMEOUT if prep_cmd == 'mountsv' else CMD_TIMEOUT
-        with _guard(f'{prep_cmd}'):
-            s.read_until(SVOS_PROMPT, timeout=t)
+    results = {}
+    for label in failed_labels:
+        with _monitor_stage(f'Rocket {label} retest') as set_stage_status:
+            retry_result = _run_rocket_cmd(s, rocket_commands[label], label)
+            if retry_result != 'PASS':
+                set_stage_status('FAIL')
+        results[label] = f'{retry_result} (Retest)'
+        _status(f'Rocket {label} fallback result: {results[label]}', 'info')
+        _pause(f'Rocket {label} fallback retry {results[label]} — press any key to continue...')
+    return results
 
-    retry_result = _run_rocket_cmd(s, cmd_rocket, label)
-    retest_result = f'{retry_result} (Retest)'
-    _status(f'Rocket {label} fallback result: {retest_result}', 'info')
-    _pause(f'Rocket {label} fallback retry {retest_result} — press any key to continue...')
-    return retest_result
+
+def _apply_rocket_retry_result(results: dict, failed_labels: list, retry_res):
+    if isinstance(retry_res, dict):
+        results.update(retry_res)
+    else:
+        for label in failed_labels:
+            results[label] = f'{retry_res} (Retest)'
 
 
 def run_memicals(s: SVOSSession) -> str:
@@ -2209,7 +2232,7 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
             'memicals':       'Memicals',
             'solar':          'Solar',
             'mlc':            'MLC',
-            'rocket_dsa':     'Rocket DSA',
+            'rocket_dsa':     'Rocket fallback',
             'svos_boot':      'SVOS Boot Check',
             'centos_boot':    'CentOS Boot',
         }
@@ -3127,17 +3150,11 @@ def _open_serial(com_port: str) -> 'SVOSSession':
                            if _should_run(content, 'mlc')      else 'SKIPPED')
 
     if _should_run(content, 'rocket'):
-        for _, label in ROCKET_ALL_CMDS:
-            first_result = results.get(label, 'FAIL')
-            if first_result not in ('PASS', 'SKIPPED'):
-                results[label] = _run_safe(
-                    f'Rocket {label} fallback',
-                    run_rocket_retry,
-                    s,
-                    label,
-                    first_result,
-                    _tkey=f'{label}_retry'
-                )
+        failed_rockets = _failed_rocket_labels(results)
+        if failed_rockets:
+            retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                  _tkey='rocket_dsa')
+            _apply_rocket_retry_result(results, failed_rockets, retry_res)
 
     try:
         run_parser(s)
@@ -3310,18 +3327,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
             if _should_run(content, 'rocket'):
-                for _, label in ROCKET_ALL_CMDS:
-                    first_result = results.get(label, 'FAIL')
-                    if first_result not in ('PASS', 'SKIPPED'):
-                        results[label] = _run_safe(
-                            f'Rocket {label} fallback',
-                            run_rocket_retry,
-                            s,
-                            label,
-                            first_result,
-                            _tkey=f'{label}_retry',
-                            _monitor_label=f'{qdf} - Rocket {label} fallback'
-                        )
+                failed_rockets = _failed_rocket_labels(results)
+                if failed_rockets:
+                    retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                          _tkey='rocket_dsa')
+                    _apply_rocket_retry_result(results, failed_rockets, retry_res)
 
             if has_svos_tests:
                 try:
@@ -3519,18 +3529,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     results['svos_boot'] = 'PASS' if has_svos_tests_r else 'SKIPPED'
 
                 if _should_run(content_r, 'rocket'):
-                    for _, label in ROCKET_ALL_CMDS:
-                        first_result = results.get(label, 'FAIL')
-                        if first_result not in ('PASS', 'SKIPPED'):
-                            results[label] = _run_safe_r(
-                                f'Rocket {label} fallback',
-                                run_rocket_retry,
-                                s,
-                                label,
-                                first_result,
-                                _tkey=f'{label}_retry',
-                                _monitor_label=f'{qdf} - Retry Rocket {label} fallback'
-                            )
+                    failed_rockets = _failed_rocket_labels(results)
+                    if failed_rockets:
+                        retry_res = _run_safe_r('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                                _tkey='rocket_dsa')
+                        _apply_rocket_retry_result(results, failed_rockets, retry_res)
                 else:
                     results['rocket_dram_dsa'] = 'SKIPPED'
 
@@ -3712,18 +3715,11 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
     if _should_run(content, 'rocket'):
-        for _, label in ROCKET_ALL_CMDS:
-            first_result = results.get(label, 'FAIL')
-            if first_result not in ('PASS', 'SKIPPED'):
-                results[label] = _run_safe(
-                    f'Rocket {label} fallback',
-                    run_rocket_retry,
-                    s,
-                    label,
-                    first_result,
-                    _tkey=f'{label}_retry',
-                    _monitor_label=f'{qdf} - Rocket {label} fallback'
-                )
+        failed_rockets = _failed_rocket_labels(results)
+        if failed_rockets:
+            retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                  _tkey='rocket_dsa')
+            _apply_rocket_retry_result(results, failed_rockets, retry_res)
     else:
         results['rocket_dram_dsa'] = 'SKIPPED'
 
