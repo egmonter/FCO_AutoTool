@@ -1523,6 +1523,9 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
             _pause('Login OK — validate in Raritan and press any key to run mountsv...')
 
             # 10. Run mountsv and wait for the prompt to return
+            _status('Waiting for SVOS shell to accept commands before mountsv...', 'wait')
+            _wait_svos_shell_ready(s, 'SVOS shell ready for mountsv')
+            _timing('SVOS shell ready', since=t_root)
             _status('Running mountsv...', 'step')
             t_mountsv = time.time()
             try:
@@ -1829,7 +1832,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False,
 _SYNC_COUNTER = 0
 
 
-def _run_svos_sync(s: SVOSSession, cmd: str, timeout, step_desc: str):
+def _run_svos_sync(s: SVOSSession, cmd: str, timeout, step_desc: str, probe: bool = False):
     """Runs a shell command and waits for a unique completion marker. Returns (output, exit_code)."""
     global _SYNC_COUNTER
     _SYNC_COUNTER += 1
@@ -1838,7 +1841,7 @@ def _run_svos_sync(s: SVOSSession, cmd: str, timeout, step_desc: str):
     pattern = re.compile(rf'{tag}_rc=(\d+)'.encode())
     s.flush()
     s.send(f'{cmd}; echo "{tag[:3]}""{tag[3:]}_rc=$?"')
-    if NO_KILL_TIME:
+    if NO_KILL_TIME and not probe:
         timeout = None
     deadline = (time.time() + timeout) if timeout is not None else None
     while True:
@@ -1857,18 +1860,32 @@ def _run_svos_sync(s: SVOSSession, cmd: str, timeout, step_desc: str):
         time.sleep(0.05)
 
 
+def _wait_svos_shell_ready(s: SVOSSession, step_desc: str, max_wait=None):
+    """Retries a no-op command until the shell executes it (post-boot scripts can swallow input)."""
+    if max_wait is None:
+        max_wait = SVOS_TIMEOUT
+    started_at = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            _run_svos_sync(s, 'true', 15, step_desc, probe=True)
+            if attempt > 1:
+                _status(f'{step_desc}: shell ready after {_fmt_dur(time.monotonic() - started_at)}.', 'ok')
+            return
+        except TimeoutError:
+            if max_wait is not None and not NO_KILL_TIME and time.monotonic() - started_at > max_wait:
+                raise FCOStepError(f'TIMEOUT waiting for: {step_desc} (SVOS shell not executing commands)')
+            _status(f'{step_desc}: shell busy (post-boot scripts?), sending ENTER and retrying ({attempt})...', 'wait')
+            s.send_enter()
+
+
 def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
     """Creates and enters the working directory for the QDF."""
     work_dir = f'/root/FCO/FCO_WW{week}/{qdf}'
 
     _status('Checking SVOS shell responsiveness before directory setup...', 'wait')
-    try:
-        _run_svos_sync(s, 'true', 30, 'SVOS shell responsiveness')
-    except TimeoutError:
-        _status('SVOS shell did not respond. Sending ENTER and retrying...', 'warn')
-        s.send_enter()
-        with _guard('SVOS shell responsiveness (retry)'):
-            _run_svos_sync(s, 'true', 60, 'SVOS shell responsiveness (retry)')
+    _wait_svos_shell_ready(s, 'SVOS shell responsiveness')
 
     with _guard('check SVOS free disk space'):
         out, _ = _run_svos_sync(s, 'echo "FCO_FREE_KB=$(df -Pk / | awk \'NR==2{print $4}\')"',
