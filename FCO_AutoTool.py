@@ -152,6 +152,7 @@ CMD_TIMEOUT      = 120   # comandos normales                        2 min
 SC_TIMEOUT       = 600   # supercollider -M 5                      10 min
 ROCKET_TIMEOUT   = 1200  # rocket + rtm por config                 20 min
 CONTENT_MIN_RUNTIME = 240  # sc/rocket -M 5 expected runtime       4 min
+SVOS_MIN_FREE_GB = 5
 MEMIC_TIMEOUT    = 2400  # memicals                                40 min
 MLC_TIMEOUT      = 2400  # mlc                                     40 min
 SOLAR_TIMEOUT    = 1200  # solar                                   20 min
@@ -1869,6 +1870,20 @@ def setup_fco_dir(s: SVOSSession, qdf: str, week: str) -> str:
         with _guard('SVOS shell responsiveness (retry)'):
             _run_svos_sync(s, 'true', 60, 'SVOS shell responsiveness (retry)')
 
+    with _guard('check SVOS free disk space'):
+        out, _ = _run_svos_sync(s, 'echo "FCO_FREE_KB=$(df -Pk / | awk \'NR==2{print $4}\')"',
+                                CMD_TIMEOUT, 'check SVOS free disk space')
+    m = re.search(rb'FCO_FREE_KB=(\d+)', out)
+    if m:
+        free_gb = int(m.group(1)) / (1024 * 1024)
+        _status(f'SVOS free space on /: {free_gb:.1f} GB', 'info')
+        if free_gb < SVOS_MIN_FREE_GB:
+            raise FCOStepError(
+                f'SVOS disk full: only {free_gb:.1f} GB free on / (minimum {SVOS_MIN_FREE_GB} GB). '
+                'Free space (e.g. old /root/FCO/FCO_WW* or qcontroller2_*.old logs) and rerun.')
+    else:
+        _status('Could not read SVOS free space; continuing.', 'warn')
+
     _status(f'Creating directory: {work_dir}', 'step')
     with _guard(f'crear/entrar a {work_dir}'):
         _, rc = _run_svos_sync(s, f'mkdir -p {work_dir} && cd {work_dir}', CMD_TIMEOUT,
@@ -1974,6 +1989,9 @@ def _run_rocket_cmd(s: SVOSSession, cmd: str, label: str) -> str:
     with _guard(f'Rocket {label}'):
         _run_svos_sync(s, cmd, ROCKET_TIMEOUT, f'Rocket {label}')
     elapsed = time.monotonic() - started_at
+    # qcontroller2 leaves ~129 MB rotated logs per run; they filled the SVOS disk before.
+    with _guard(f'cleanup qcontroller2 logs ({label})'):
+        _run_svos_sync(s, 'rm -f qcontroller2_*.log*.old', CMD_TIMEOUT, f'cleanup qcontroller2 logs ({label})')
     if elapsed < CONTENT_MIN_RUNTIME:
         _status(
             f'Rocket {label} ended too early ({_fmt_dur(elapsed)} < '
