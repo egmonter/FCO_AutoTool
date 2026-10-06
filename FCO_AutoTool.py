@@ -2068,11 +2068,20 @@ def _failed_rocket_labels(results: dict) -> list:
             if results.get(label, 'FAIL') not in ('PASS', 'SKIPPED')]
 
 
-def run_rocket_retry(s: SVOSSession, failed_labels: list) -> dict:
-    """Runs the contention recovery sequence once, then retests each failed Rocket."""
+def _failed_content_labels(results: dict) -> list:
+    """Rocket configs plus Solar/MLC that did not PASS and were not SKIPPED."""
+    labels = _failed_rocket_labels(results)
+    labels += [key for key in ('solar', 'mlc')
+               if results.get(key, 'FAIL') not in ('PASS', 'SKIPPED')]
+    return labels
+
+
+def run_content_retry(s: SVOSSession, failed_labels: list) -> dict:
+    """Runs the contention recovery sequence once, then retests each failed Rocket/Solar/MLC item."""
     rocket_commands = {name: cmd for cmd, name in ROCKET_ALL_CMDS}
-    _status(f'Rocket failed: {", ".join(failed_labels)}. Running contention recovery sequence once...', 'warn')
-    with _monitor_stage('Rocket recovery (killmax/umountsv/rmmodsvos2/mountsv)'):
+    retest_fns = {'solar': run_solar, 'mlc': run_mlc}
+    _status(f'Failed: {", ".join(failed_labels)}. Running contention recovery sequence once...', 'warn')
+    with _monitor_stage('Recovery (killmax/umountsv/rmmodsvos2/mountsv)'):
         for prep_cmd in ['killmax', 'umountsv', 'rmmodsvos2', 'mountsv']:
             _status(f'  Running {prep_cmd}...', 'info')
             started_at = time.monotonic()
@@ -2083,17 +2092,20 @@ def run_rocket_retry(s: SVOSSession, failed_labels: list) -> dict:
 
     results = {}
     for label in failed_labels:
-        with _monitor_stage(f'Rocket {label} retest') as set_stage_status:
-            retry_result = _run_rocket_cmd(s, rocket_commands[label], label)
+        with _monitor_stage(f'{label} retest') as set_stage_status:
+            if label in rocket_commands:
+                retry_result = _run_rocket_cmd(s, rocket_commands[label], label)
+            else:
+                retry_result = retest_fns[label](s)
             if retry_result != 'PASS':
                 set_stage_status('FAIL')
         results[label] = f'{retry_result} (Retest)'
-        _status(f'Rocket {label} fallback result: {results[label]}', 'info')
-        _pause(f'Rocket {label} fallback retry {results[label]} — press any key to continue...')
+        _status(f'{label} fallback result: {results[label]}', 'info')
+        _pause(f'{label} fallback retry {results[label]} — press any key to continue...')
     return results
 
 
-def _apply_rocket_retry_result(results: dict, failed_labels: list, retry_res):
+def _apply_retry_result(results: dict, failed_labels: list, retry_res):
     if isinstance(retry_res, dict):
         results.update(retry_res)
     else:
@@ -2117,12 +2129,11 @@ def run_memicals(s: SVOSSession) -> str:
 
 def run_mlc(s: SVOSSession) -> str:
     _status('Running MLC (mlc --loaded_latency -t60)...', 'step')
-    s.send('mlc --loaded_latency -t60 -Mdatapattern_halfA_half5.txt > mlc_test.txt')
     with _guard('MLC'):
-        s.read_until(SVOS_PROMPT, timeout=MLC_TIMEOUT)
-    s.send('grep -i "pass\\|fail\\|success" mlc_test.txt')
+        _run_svos_sync(s, 'mlc --loaded_latency -t60 -Mdatapattern_halfA_half5.txt > mlc_test.txt',
+                      MLC_TIMEOUT, 'MLC')
     with _guard('parse mlc_test.txt'):
-        _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
+        buf, _ = _run_svos_sync(s, 'grep -i "pass\\|fail\\|success" mlc_test.txt', CMD_TIMEOUT, 'parse mlc_test.txt')
     result = 'PASS' if (b'PASS' in buf.upper() or b'SUCCESS' in buf.upper()) else ('FAIL' if b'FAIL' in buf.upper() else 'UNKNOWN')
     _status(f'MLC: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'MLC {result} — press any key to continue...')
@@ -2131,24 +2142,9 @@ def run_mlc(s: SVOSSession) -> str:
 
 def run_solar(s: SVOSSession) -> str:
     _status('Running Solar...', 'step')
-    s.send(SOLAR_CMD)
-    solar_timeout = False
-    try:
-        _, buf = s.read_until_any([b'PASS', b'pass', b'FAIL', b'fail',
-                                    SVOS_PROMPT], timeout=SOLAR_TIMEOUT)
-        result = 'PASS' if (b'PASS' in buf or b'pass' in buf) else 'FAIL'
-    except TimeoutError:
-        result = 'FAIL'
-        solar_timeout = True
-        _status('Solar: TIMEOUT', 'fail')
-    try:
-        s.read_until(SVOS_PROMPT, timeout=120)
-    except TimeoutError:
-        solar_timeout = True
-
-    if solar_timeout:
-        _recover_svos_prompt_after_timeout(s, 'Solar')
-
+    with _guard('Solar'):
+        buf, _ = _run_svos_sync(s, SOLAR_CMD, SOLAR_TIMEOUT, 'Solar')
+    result = 'PASS' if (b'PASS' in buf.upper() or b'SUCCESS' in buf.upper()) else ('FAIL' if b'FAIL' in buf.upper() else 'UNKNOWN')
     _status(f'Solar: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'Solar {result} — press any key to continue...')
     return result
@@ -3213,12 +3209,11 @@ def _open_serial(com_port: str) -> 'SVOSSession':
     results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc')
                            if _should_run(content, 'mlc')      else 'SKIPPED')
 
-    if _should_run(content, 'rocket'):
-        failed_rockets = _failed_rocket_labels(results)
-        if failed_rockets:
-            retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
-                                  _tkey='rocket_dsa')
-            _apply_rocket_retry_result(results, failed_rockets, retry_res)
+    failed_items = _failed_content_labels(results)
+    if failed_items:
+        retry_res = _run_safe('Content fallback', run_content_retry, s, failed_items,
+                              _tkey='rocket_dsa')
+        _apply_retry_result(results, failed_items, retry_res)
 
     try:
         run_parser(s)
@@ -3390,12 +3385,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 # If any SVOS content already ran successfully, SVOS boot is implicitly validated.
                 results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
-            if _should_run(content, 'rocket'):
-                failed_rockets = _failed_rocket_labels(results)
-                if failed_rockets:
-                    retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
-                                          _tkey='rocket_dsa')
-                    _apply_rocket_retry_result(results, failed_rockets, retry_res)
+            failed_items = _failed_content_labels(results)
+            if failed_items:
+                retry_res = _run_safe('Content fallback', run_content_retry, s, failed_items,
+                                      _tkey='rocket_dsa')
+                _apply_retry_result(results, failed_items, retry_res)
 
             if has_svos_tests:
                 try:
@@ -3571,6 +3565,7 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 else:
                     for _, label in ROCKET_CMDS:
                         results[label] = 'SKIPPED'
+                    results['rocket_dram_dsa'] = 'SKIPPED'
 
                 results['memicals'] = (_run_safe_r('Memicals', run_memicals, s, _tkey='memicals',
                                                    _monitor_label=f'{qdf} - Retry Memicals')
@@ -3592,14 +3587,11 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     # Retry follows same rule: any executed SVOS content implies boot validation.
                     results['svos_boot'] = 'PASS' if has_svos_tests_r else 'SKIPPED'
 
-                if _should_run(content_r, 'rocket'):
-                    failed_rockets = _failed_rocket_labels(results)
-                    if failed_rockets:
-                        retry_res = _run_safe_r('Rocket fallback', run_rocket_retry, s, failed_rockets,
-                                                _tkey='rocket_dsa')
-                        _apply_rocket_retry_result(results, failed_rockets, retry_res)
-                else:
-                    results['rocket_dram_dsa'] = 'SKIPPED'
+                failed_items = _failed_content_labels(results)
+                if failed_items:
+                    retry_res = _run_safe_r('Content fallback', run_content_retry, s, failed_items,
+                                            _tkey='rocket_dsa')
+                    _apply_retry_result(results, failed_items, retry_res)
 
                 if has_svos_tests_r:
                     try:
@@ -3757,6 +3749,7 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     else:
         for _, label in ROCKET_CMDS:
             results[label] = 'SKIPPED'
+        results['rocket_dram_dsa'] = 'SKIPPED'
 
     results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals',
                                      _monitor_label=f'{qdf} - Memicals')
@@ -3778,14 +3771,11 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         # Same rule as main loop: if any SVOS content ran, boot is implicitly validated.
         results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
-    if _should_run(content, 'rocket'):
-        failed_rockets = _failed_rocket_labels(results)
-        if failed_rockets:
-            retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
-                                  _tkey='rocket_dsa')
-            _apply_rocket_retry_result(results, failed_rockets, retry_res)
-    else:
-        results['rocket_dram_dsa'] = 'SKIPPED'
+    failed_items = _failed_content_labels(results)
+    if failed_items:
+        retry_res = _run_safe('Content fallback', run_content_retry, s, failed_items,
+                              _tkey='rocket_dsa')
+        _apply_retry_result(results, failed_items, retry_res)
 
     if has_svos_tests:
         try:
