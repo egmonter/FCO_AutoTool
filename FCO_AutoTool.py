@@ -2093,6 +2093,9 @@ def run_content_retry(s: SVOSSession, failed_labels: list) -> dict:
     for label in failed_labels:
         with _monitor_stage(f'{label} retest') as set_stage_status:
             if label in rocket_commands:
+                # A prior aborted run can leave a truncated/binary .txt that breaks the status grep.
+                with _guard(f'cleanup {label}.txt before retest'):
+                    _run_svos_sync(s, f'rm -f {label}.txt', CMD_TIMEOUT, f'cleanup {label}.txt before retest')
                 retry_result = _run_rocket_cmd(s, rocket_commands[label], label)
             else:
                 retry_result = retest_fns[label](s)
