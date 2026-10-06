@@ -1973,9 +1973,8 @@ def run_supercollider(s: SVOSSession) -> str:
     for attempt in range(1, 3):
         _status(f'Running SuperCollider (sc -M 5), attempt {attempt}/2...', 'step')
         started_at = time.monotonic()
-        s.send('sc -M 5 > sc_out.txt')
         with _guard('SuperCollider - sc -M 5'):
-            s.read_until(SVOS_PROMPT, timeout=SC_TIMEOUT)
+            _run_svos_sync(s, 'sc -M 5 > sc_out.txt', SC_TIMEOUT, 'SuperCollider - sc -M 5')
         elapsed = time.monotonic() - started_at
         if elapsed >= CONTENT_MIN_RUNTIME:
             break
@@ -1990,9 +1989,8 @@ def run_supercollider(s: SVOSSession) -> str:
             _status('SuperCollider remained too short after retry; recording FAIL.', 'fail')
             return 'FAIL'
 
-    s.send('grep -i "TEST PASSED\\|TEST FAILED" sc_out.txt')
     with _guard('parse sc_out.txt'):
-        _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
+        buf, _ = _run_svos_sync(s, 'grep -i "TEST PASSED\\|TEST FAILED" sc_out.txt', CMD_TIMEOUT, 'parse sc_out.txt')
     result = 'PASS' if b'TEST PASSED' in buf else ('FAIL' if b'TEST FAILED' in buf else 'UNKNOWN')
     _status(f'SuperCollider: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'SuperCollider {result} — press any key to continue...')
@@ -2069,17 +2067,18 @@ def _failed_rocket_labels(results: dict) -> list:
 
 
 def _failed_content_labels(results: dict) -> list:
-    """Rocket configs plus Solar/MLC that did not PASS and were not SKIPPED."""
+    """Rocket configs plus SuperCollider/Memicals/Solar/MLC that did not PASS and were not SKIPPED."""
     labels = _failed_rocket_labels(results)
-    labels += [key for key in ('solar', 'mlc')
+    labels += [key for key in ('supercollider', 'memicals', 'solar', 'mlc')
                if results.get(key, 'FAIL') not in ('PASS', 'SKIPPED')]
     return labels
 
 
 def run_content_retry(s: SVOSSession, failed_labels: list) -> dict:
-    """Runs the contention recovery sequence once, then retests each failed Rocket/Solar/MLC item."""
+    """Runs the contention recovery sequence once, then retests each failed SVOS content item."""
     rocket_commands = {name: cmd for cmd, name in ROCKET_ALL_CMDS}
-    retest_fns = {'solar': run_solar, 'mlc': run_mlc}
+    retest_fns = {'supercollider': run_supercollider, 'memicals': run_memicals,
+                  'solar': run_solar, 'mlc': run_mlc}
     _status(f'Failed: {", ".join(failed_labels)}. Running contention recovery sequence once...', 'warn')
     with _monitor_stage('Recovery (killmax/umountsv/rmmodsvos2/mountsv)'):
         for prep_cmd in ['killmax', 'umountsv', 'rmmodsvos2', 'mountsv']:
@@ -2115,12 +2114,11 @@ def _apply_retry_result(results: dict, failed_labels: list, retry_res):
 
 def run_memicals(s: SVOSSession) -> str:
     _status('Running Memicals (memic.py -M 15)...', 'step')
-    s.send('memic.py -M 15 memicals:high-mem:proc -X proc:0,1,2,3 > memic_tst.txt')
     with _guard('Memicals - memic.py'):
-        s.read_until(SVOS_PROMPT, timeout=MEMIC_TIMEOUT)
-    s.send('grep -i "pass\\|fail\\|success" memic_tst.txt')
+        _run_svos_sync(s, 'memic.py -M 15 memicals:high-mem:proc -X proc:0,1,2,3 > memic_tst.txt',
+                       MEMIC_TIMEOUT, 'Memicals - memic.py')
     with _guard('parse memic_tst.txt'):
-        _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
+        buf, _ = _run_svos_sync(s, 'grep -i "pass\\|fail\\|success" memic_tst.txt', CMD_TIMEOUT, 'parse memic_tst.txt')
     result = 'PASS' if (b'PASS' in buf.upper() or b'SUCCESS' in buf.upper()) else ('FAIL' if b'FAIL' in buf.upper() else 'UNKNOWN')
     _status(f'Memicals: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'Memicals {result} — press any key to continue...')
