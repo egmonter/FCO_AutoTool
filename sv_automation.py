@@ -167,6 +167,12 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
                 sig.unlink()
                 print(f'  [cleanup] Previous signal removed: {name}')
 
+    # A stale autotool_done.signal from a previous run would make the idle loop exit instantly.
+    stale_done_signal = sig_dir / 'autotool_done.signal'
+    if stale_done_signal.exists():
+        stale_done_signal.unlink()
+        print('  [cleanup] Previous signal removed: autotool_done.signal')
+
     for i, item in enumerate(qdf_list):
         qdf        = item['qdf']
         ult0       = item['ult0']
@@ -245,6 +251,7 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
     #   2. Waits for retry_needed signal (timeout 30s, then loop back to check CentOS)
     all_qdf_strs = [item['qdf'] for item in qdf_list]
     retry_signal = sig_dir / 'retry_needed.signal'
+    autotool_done_signal = sig_dir / 'autotool_done.signal'
 
     if not centos_monitor_enabled and not retry_signal.exists():
         print("\n  [INFO] No CentOS monitoring and no retry requested. Exiting pysv helper.")
@@ -257,6 +264,10 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
             if _handle_centos_requests(sig_dir, bs_wrap, all_qdf_strs):
                 print("  [IDLE] CentOS power cycle handled. Returning to idle monitoring...\n")
                 continue
+
+            if autotool_done_signal.exists() and not retry_signal.exists():
+                print("\n  [INFO] AutoTool closed and no retry was requested. Exiting idle monitoring.")
+                return
 
             # Wait for retry_needed with timeout (check every 30s for CentOS signals)
             if _wait_for_file_timeout(retry_signal, poll=5, timeout=30):

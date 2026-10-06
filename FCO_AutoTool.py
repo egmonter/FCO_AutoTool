@@ -2461,7 +2461,7 @@ def _clean_signals(qdf_list):
                 sig.unlink()
                 logging.info(f'Previous signal removed: {name}')
     # Clean up global retry signals
-    for name in ['retry_needed.signal', 'retry_needed.json', 'retry_ready.signal']:
+    for name in ['retry_needed.signal', 'retry_needed.json', 'retry_ready.signal', 'autotool_done.signal']:
         sig = SIGNAL_DIR / name
         if sig.exists():
             sig.unlink()
@@ -4975,6 +4975,11 @@ def main():
                 logging.info('Serial port closed.')
             except Exception:
                 pass
+        try:
+            (SIGNAL_DIR / 'autotool_done.signal').write_text('done\n')
+            logging.info('autotool_done.signal written (pysv idle loop can stop monitoring).')
+        except Exception:
+            pass
 
     # ---- Summary file for all QDFs ----
     if all_results:
