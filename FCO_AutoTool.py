@@ -52,6 +52,10 @@ class BiosTimeoutError(FCOStepError):
     """BIOS screen did not appear within the expected time — retryable via power cycle."""
     pass
 
+class BiosStallError(BiosTimeoutError):
+    """No serial activity at all for a while during BIOS wait — real hang, not just slow POST."""
+    pass
+
 class StepSkippedError(FCOStepError):
     """The operator skipped the currently waiting step."""
     pass
@@ -143,6 +147,7 @@ BOOT_TIMEOUT     = 600   # boot until EFI shell (post-BIOS)       10 min
 BIOS_REBOOT_WAIT = 10    # minimum wait before looking for BIOS (flush buffer)
 BIOS_WAIT_TIMEOUT= 900   # BIOS screen timeout before retry    15 min
 BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
+BIOS_STALL_TIMEOUT = 180  # no serial activity at all -> real hang       3 min
 EFI_SERIAL_TAIL_MAX = 20  # max seconds to keep reading serial after EFI/BIOs detect in Tool 5
 EFI_SERIAL_TAIL_IDLE = 2  # stop tail capture after this many idle seconds
 SVOS_TIMEOUT     = 600   # boot SVOS                               10 min
@@ -167,6 +172,7 @@ _TIMEOUT_DEFAULTS = {
     'BIOS_REBOOT_WAIT': BIOS_REBOOT_WAIT,
     'BIOS_WAIT_TIMEOUT': BIOS_WAIT_TIMEOUT,
     'BIOS_NUDGE_INTERVAL': BIOS_NUDGE_INTERVAL,
+    'BIOS_STALL_TIMEOUT': BIOS_STALL_TIMEOUT,
     'SVOS_TIMEOUT': SVOS_TIMEOUT,
     'CENTOS_BOOT_TIMEOUT': CENTOS_BOOT_TIMEOUT,
     'MOUNTSV_TIMEOUT': MOUNTSV_TIMEOUT,
@@ -194,7 +200,7 @@ def _ensure_timeouts_file():
 
 def _apply_timeouts_from_file():
     """Loads timeout values from timeouts_config.json and applies them globally."""
-    global BOOT_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL
+    global BOOT_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL, BIOS_STALL_TIMEOUT
     global SVOS_TIMEOUT, CENTOS_BOOT_TIMEOUT, MOUNTSV_TIMEOUT, CMD_TIMEOUT
     global SC_TIMEOUT, ROCKET_TIMEOUT, MEMIC_TIMEOUT, MLC_TIMEOUT, SOLAR_TIMEOUT
     global OSVOSUPDATE_TIMEOUT, SVOSINFO_TIMEOUT, UPDATE_MOUNTSV_TIMEOUT
@@ -936,6 +942,7 @@ class SVOSSession:
         self.buf     = b''
         self._capture_stack = []
         self._live_log = None
+        self._last_rx_time = time.monotonic()
         try:
             SERIAL_SEGMENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
             live_path = SERIAL_SEGMENT_LOG_DIR / f'live_{_sanitize_log_token(port)}.log'
@@ -1066,6 +1073,7 @@ class SVOSSession:
             if chunk:
                 self.buf += chunk
                 self._print(chunk)
+                self._last_rx_time = time.monotonic()
             if expected in self.buf:
                 out, self.buf = self.buf, b''
                 return out
@@ -1086,6 +1094,7 @@ class SVOSSession:
             if chunk:
                 self.buf += chunk
                 self._print(chunk)
+                self._last_rx_time = time.monotonic()
             for p in enc:
                 if p in self.buf:
                     out, self.buf = self.buf, b''
@@ -1214,15 +1223,23 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int | None, enable_nudge:
     Waits for the BIOS screen.
     If enable_nudge=True and no data arrives (static BIOS), sends a refresh key
     every BIOS_NUDGE_INTERVAL seconds to force redraw over serial.
+    Raises BiosStallError early (before the full timeout) if the serial line goes
+    completely silent for BIOS_STALL_TIMEOUT seconds — a sign of a real BIOS/POST hang.
     """
     nudge_key = b'\x1b[B'  # down arrow
     deadline = (time.time() + timeout) if timeout is not None else None
+    s._last_rx_time = time.monotonic()  # stall clock starts now, not from an earlier command
 
     while True:
         if _check_skip_key():
             if NO_KILL_TIME:
                 raise StepSkippedError('Waiting for BIOS screen')
             raise BiosTimeoutError("BIOS screen wait skipped by user pressing 's'")
+
+        if time.monotonic() - s._last_rx_time > BIOS_STALL_TIMEOUT:
+            raise BiosStallError(
+                f'No serial activity at all for {BIOS_STALL_TIMEOUT}s while waiting for BIOS '
+                '(system appears hung in POST).')
 
         if deadline is None:
             wait = BIOS_NUDGE_INTERVAL
@@ -2804,6 +2821,71 @@ def _has_svos_content(content) -> bool:
     return any(test in content for test in CONTENT_TESTS if test not in ('centos_boot', 'svos_boot'))
 
 
+def _request_pysv_power_cycle(qdf: str) -> bool:
+    """Asks pysv to power-cycle the SUT (no fuse overwrite). Returns True on success."""
+    _status(f'Requesting power cycle from pysv for {qdf}...', 'info')
+    power_cycle_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycle.signal'
+    power_cycled_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycled.signal'
+    for sig in (power_cycle_signal, power_cycled_signal):
+        if sig.exists():
+            sig.unlink()
+
+    power_cycle_signal.write_text('requested\n')
+    _status(f'Sent signal: {power_cycle_signal.name}', 'info')
+    with _monitor_stage(f'{qdf} - CentOS power cycle request'):
+        _status('Waiting for pysv power cycle completion...', 'wait')
+        _wait_for_file(power_cycled_signal)
+    done_content = power_cycled_signal.read_text().strip()
+    if done_content == 'error':
+        _status('pysv reported error during power cycle.', 'fail')
+        return False
+    _status('Power cycle completed by pysv.', 'ok')
+    return True
+
+
+def _prepare_centos_reboot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str,
+                           kwargs: dict, centos_only: bool) -> bool:
+    """Requests the reboot/overwrite needed before navigating to CentOS. Returns False on failure.
+
+    Modes 1/3/4 redo the full fuse overwrite (wrapper) so a prior power cycle never leaves the
+    SUT on stale/default fuses; mode 2 only needs a plain power cycle (no SVOS overwrite content).
+    """
+    if mode == 2 and centos_only:
+        # CentOS-only: no SVOS, no pysv needed — go straight to BIOS/CentOS navigation.
+        _status('CentOS-only: sending reboot and then navigating to CentOS...', 'info')
+        try:
+            s.send('reboot')
+            time.sleep(1)
+        except Exception as e:
+            _status(f'Could not send reboot before CentOS flow: {e}. Continuing...', 'warn')
+        return True
+    if mode == 2:
+        # Mode 2 with SVOS tests: request hardware power cycle from pysv.
+        return _request_pysv_power_cycle(qdf)
+
+    # Modes with pysv (1, 3, 4): request wrapper to re-run the fuse overwrite for CentOS
+    _status('Modes 1/3/4: Requesting wrapper execution from pysv...', 'info')
+    wrapper_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper.signal'
+    wrapper_signal.write_text(json.dumps({
+        'qdf': qdf, 'ult0': ult0, 'soc': soc, 'kwargs': kwargs or {}
+    }) + '\n')
+    _status(f'Sent signal: {wrapper_signal.name}', 'info')
+
+    wrapper_done_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper_done.signal'
+    if wrapper_done_signal.exists():
+        wrapper_done_signal.unlink()
+    with _monitor_stage(f'{qdf} - CentOS wrapper execution'):
+        _status('Waiting for pysv wrapper execution...', 'wait')
+        _wait_for_file(wrapper_done_signal)
+
+    done_content = wrapper_done_signal.read_text().strip()
+    if done_content == 'error':
+        _status('pysv reported error in wrapper execution.', 'fail')
+        return False
+    _status('Wrapper execution completed by pysv.', 'ok')
+    return True
+
+
 def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = 'x4', 
                      kwargs: dict = None, is_retry: bool = False,
                      centos_only: bool = False) -> str:
@@ -2818,65 +2900,8 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
     _status(f'Running CentOS boot (reboot + {CENTOS_GRUB_PATH} + login)...', 'step')
     
     try:
-        # Reboot/overwrite preparation depends on mode and fused status
-        if mode == 2 and centos_only:
-            # CentOS-only: no SVOS, no pysv needed — go straight to BIOS/CentOS navigation.
-            _status('CentOS-only: sending reboot and then navigating to CentOS...', 'info')
-            try:
-                s.send('reboot')
-                time.sleep(1)
-            except Exception as e:
-                _status(f'Could not send reboot before CentOS flow: {e}. Continuing...', 'warn')
-        elif mode == 2:
-            # Mode 2 with SVOS tests: request hardware power cycle from pysv.
-            _status('Mode 2: Requesting power cycle from pysv...', 'info')
-
-            # Clean stale signals to avoid false-positive completion.
-            for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal']:
-                sig = SIGNAL_DIR / sig_name
-                if sig.exists():
-                    sig.unlink()
-            
-            # Write power cycle signal
-            power_cycle_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycle.signal'
-            power_cycle_signal.write_text('requested\n')
-            _status(f'Sent signal: {power_cycle_signal.name}', 'info')
-            
-            # Wait for power cycle completion
-            power_cycled_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycled.signal'
-            with _monitor_stage(f'{qdf} - CentOS power cycle request'):
-                _status(f'Waiting for pysv power cycle completion...', 'wait')
-                _wait_for_file(power_cycled_signal)
-            
-            done_content = power_cycled_signal.read_text().strip()
-            if done_content == 'error':
-                _status('pysv reported error during power cycle.', 'fail')
-                return 'FAIL'
-            
-            _status('Power cycle completed by pysv.', 'ok')
-        else:
-            # Modes with pysv (1, 3, 4): request wrapper to run for CentOS overwrite
-            _status('Modes 1/3/4: Requesting wrapper execution from pysv...', 'info')
-            
-            # Write wrapper request signal
-            wrapper_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper.signal'
-            wrapper_signal.write_text(json.dumps({
-                'qdf': qdf, 'ult0': ult0, 'soc': soc, 'kwargs': kwargs or {}
-            }) + '\n')
-            _status(f'Sent signal: {wrapper_signal.name}', 'info')
-            
-            # Wait for wrapper completion
-            wrapper_done_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper_done.signal'
-            with _monitor_stage(f'{qdf} - CentOS wrapper execution'):
-                _status(f'Waiting for pysv wrapper execution...', 'wait')
-                _wait_for_file(wrapper_done_signal)
-            
-            done_content = wrapper_done_signal.read_text().strip()
-            if done_content == 'error':
-                _status('pysv reported error in wrapper execution.', 'fail')
-                return 'FAIL'
-            
-            _status('Wrapper execution completed by pysv.', 'ok')
+        if not _prepare_centos_reboot(s, mode, qdf, ult0, soc, kwargs, centos_only):
+            return 'FAIL'
         
         # Boot CentOS (split monitor stages: Boot to EFI -> Boot CentOS)
         centos_result = boot_centos(
@@ -2891,7 +2916,33 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             _status('CentOS boot successful.', 'ok')
         _pause('CentOS boot OK — validate and press any key to continue...')
         return 'PASS'
-        
+
+    except BiosStallError as e:
+        _status(f'CentOS boot stalled: {e}', 'fail')
+        logging.error(f'CentOS boot stalled for {qdf}: {e}', exc_info=True)
+        _status('Retrying: redoing reboot/overwrite before trying CentOS boot again...', 'warn')
+        if not _prepare_centos_reboot(s, mode, qdf, ult0, soc, kwargs, centos_only):
+            _status('Recovery failed; giving up on CentOS boot for this QDF.', 'fail')
+            return 'FAIL'
+        try:
+            centos_result = boot_centos(
+                s,
+                fused_nudge=(mode in (2, 3, 4)),
+                monitor_split=True,
+                stage_prefix=f'{qdf} (retry)',
+            )
+            if centos_result == 'CONDITIONAL_PASS':
+                _status('CentOS boot conditional PASS on retry.', 'warn')
+            else:
+                _status('CentOS boot successful on retry.', 'ok')
+            _pause('CentOS boot OK — validate and press any key to continue...')
+            return 'PASS'
+        except Exception as e2:
+            _status(f'CentOS boot FAILED again after power cycle: {e2}', 'fail')
+            logging.error(f'CentOS boot failed again for {qdf}: {e2}', exc_info=True)
+            _status('Auto-skip enabled: continuing with next QDF after CentOS failure.', 'warn')
+            return 'FAIL'
+
     except Exception as e:
         _status(f'CentOS boot FAILED: {e}', 'fail')
         logging.error(f'CentOS boot failed for {qdf}: {e}', exc_info=True)
