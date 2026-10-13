@@ -2904,9 +2904,10 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
                      centos_only: bool = False) -> str:
     """
     Boots CentOS as part of the QDF content workflow.
-    For modes with pysv overwrite (1/3/4): triggers overwrite + reboot + boot CentOS.
+    For modes with pysv overwrite (1/3/4): prepares the required cycle, then boots CentOS.
     For mode 2 (fused, with SVOS tests): requests power cycle from pysv + boots CentOS.
-    For mode 2 (centos_only=True): sends soft reboot via serial, no pysv needed.
+    For CentOS-only on a fused mode 2 unit: sends soft reboot via serial.
+    For unfused Mode 1 CentOS-only: reuses the initial overwrite and requests only a power cycle.
 
     Returns 'PASS' or 'FAIL'.
     """
@@ -2922,9 +2923,8 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
                 time.sleep(1)
             except Exception as e:
                 _status(f'Could not send reboot before CentOS flow: {e}. Continuing...', 'warn')
-        elif mode == 2:
-            # Mode 2 with SVOS tests: request hardware power cycle from pysv.
-            _status('Mode 2: Requesting power cycle from pysv...', 'info')
+        elif mode == 2 or (mode == 1 and centos_only):
+            _status('Requesting power cycle from pysv before CentOS boot...', 'info')
 
             # Clean stale signals to avoid false-positive completion.
             for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal']:
@@ -3498,7 +3498,8 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
             if _should_run(content, 'centos_boot'):
                 t0_centos = time.time()
                 centos_result = run_centos_boot(s, mode, qdf, ult0, item.get('soc', 'x4'),
-                                                item.get('kwargs'), is_retry=False)
+                                                item.get('kwargs'), is_retry=False,
+                                                centos_only=(mode == 1 and not needs_svos))
                 if CRONOS_MODE:
                     _timings.setdefault(qdf, {})['centos_boot'] = time.time() - t0_centos
                 results['centos_boot'] = centos_result
