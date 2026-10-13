@@ -806,6 +806,18 @@ def _strip_ansi(data: bytes) -> str:
     return re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\x1b=|\x1b>', '', text)
 
 
+def _centos_login_prompt_present(data: bytes) -> bool:
+    """Matches an actual getty login prompt, not the CentOS 'Last login:' banner."""
+    for line in _strip_ansi(data).splitlines():
+        candidate = line.strip()
+        if candidate.lower().startswith('last login:'):
+            continue
+        if candidate.lower() == 'login:' or re.fullmatch(
+                r'[A-Za-z0-9_.-]+\s+login:', candidate, flags=re.IGNORECASE):
+            return True
+    return False
+
+
 # EDK2 color pattern for the HIGHLIGHTED item (white on black = selected)
 # BIOS sends ESC[37m ESC[40m just before the text of the active item
 _HIGHLIGHT_RE = re.compile(
@@ -1087,7 +1099,9 @@ class SVOSSession:
                 self.buf += chunk
                 self._print(chunk)
             for p in enc:
-                if p in self.buf:
+                found = (_centos_login_prompt_present(self.buf)
+                         if p in CENTOS_LOGIN_PROMPTS else p in self.buf)
+                if found:
                     out, self.buf = self.buf, b''
                     return p, out
             if deadline and time.time() > deadline:
@@ -1299,7 +1313,9 @@ def _read_until_any_with_periodic_enter(s: SVOSSession, patterns, timeout=SVOS_T
             s._print(chunk)
 
         for p in enc:
-            if p in s.buf:
+            found = (_centos_login_prompt_present(s.buf)
+                     if p in CENTOS_LOGIN_PROMPTS else p in s.buf)
+            if found:
                 out, s.buf = s.buf, b''
                 return p, out
 
@@ -1627,7 +1643,6 @@ def _wait_for_centos_login_or_conditional(s: SVOSSession,
     If Linux banner is already present and login does not appear within
     conditional_after seconds, returns CONDITIONAL_PASS early.
     """
-    enc = [p.encode() if isinstance(p, str) else p for p in CENTOS_LOGIN_PROMPTS]
     start = time.time()
     deadline = float('inf') if (NO_KILL_TIME or timeout is None) else start + timeout
     next_enter = (start + enter_every) if enter_every > 0 else None
@@ -1639,9 +1654,8 @@ def _wait_for_centos_login_or_conditional(s: SVOSSession,
             s.buf += chunk
             s._print(chunk)
 
-        for p in enc:
-            if p in s.buf:
-                return 'LOGIN'
+        if _centos_login_prompt_present(s.buf):
+            return 'LOGIN'
 
         now = time.time()
         if now >= deadline:
