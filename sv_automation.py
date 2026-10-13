@@ -510,6 +510,22 @@ def run_mode2_centos_monitor(qdf=None, signal_dir=None):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _build_wrapper_params(qdf, ult0, soc, kwargs):
+    kwargs = dict(kwargs or {})
+    exact_args = bool(kwargs.pop('_fco_exact_wrapper_args', False))
+    arg_order = kwargs.pop('_fco_argument_order', [])
+    if exact_args:
+        values = {'qdf': qdf, 'ult0': ult0, 'soc': soc}
+        values.update(kwargs)
+        ordered = {key: values[key] for key in arg_order if key in values}
+        ordered.update((key, value) for key, value in values.items() if key not in ordered)
+        return ordered
+
+    all_params = dict(qdf=qdf, ult0=ult0, soc=soc, **FIXED_PARAMS)
+    all_params.update(kwargs)
+    return all_params
+
+
 def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     progress_file = kwargs.pop('progress_file', None)
     _write_progress(progress_file, 'HOOK_CHECK')
@@ -579,25 +595,7 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
             raise RuntimeError(f"Unable to validate hookstatus(0,3) after recovery: {e}")
 
     # Build wrapper args in canonical order to match the manual command semantics.
-    merged = dict(FIXED_PARAMS)
-    merged.update(kwargs)  # explicit user kwargs override config defaults
-
-    all_params = {
-        'qdf': qdf,
-        'ult0': ult0,
-        'proj': merged.get('proj', 'DMRUCC'),
-        'stepping': merged.get('stepping', 'a0'),
-        'soc': soc,
-        'pwrgoodmethod': merged.get('pwrgoodmethod', 'usb'),
-        'fused_unit': merged.get('fused_unit', False),
-        'extra_args': merged.get('extra_args', {'disable_axon': True}),
-        'pwrgooddelay': merged.get('pwrgooddelay', 30),
-    }
-
-    # Preserve any additional optional wrapper args beyond the canonical set.
-    for k, v in merged.items():
-        if k not in all_params:
-            all_params[k] = v
+    all_params = _build_wrapper_params(qdf, ult0, soc, kwargs)
 
     params_str = ', '.join(f"{k}={v!r}" for k, v in all_params.items())
     print(f"\n  Command to run:")
@@ -684,8 +682,7 @@ def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
                 soc_w = wrapper_params.get('soc', 'x4')
                 kwargs_w = wrapper_params.get('kwargs', {})
 
-                all_params_w = dict(qdf=qdf_w, ult0=ult0_w, soc=soc_w, **FIXED_PARAMS)
-                all_params_w.update(kwargs_w)
+                all_params_w = _build_wrapper_params(qdf_w, ult0_w, soc_w, kwargs_w)
 
                 print(f"  [CentOS-Wrapper] Executing wrapper for {qdf_w}...")
                 params_str = ', '.join(f"{k}={v!r}" for k, v in all_params_w.items())

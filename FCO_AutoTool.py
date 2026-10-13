@@ -2709,11 +2709,95 @@ def _ask_com_week():
     return com_port, week
 
 
+def _parse_bs_wrap_command(command: str) -> dict:
+    """Parses a literal bs_wrap.main(...) call without evaluating user input."""
+    import ast
+
+    try:
+        parsed = ast.parse(command.strip(), mode='eval').body
+    except SyntaxError as e:
+        raise ValueError(f'Invalid Python command syntax: {e.msg}') from e
+    if not (isinstance(parsed, ast.Call) and isinstance(parsed.func, ast.Attribute)
+            and isinstance(parsed.func.value, ast.Name)
+            and parsed.func.value.id == 'bs_wrap' and parsed.func.attr == 'main'):
+        raise ValueError('Paste a full bs_wrap.main(...) command.')
+    if parsed.args or any(keyword.arg is None for keyword in parsed.keywords):
+        raise ValueError('Use keyword arguments only; ** unpacking is not supported.')
+
+    params = {}
+    try:
+        for keyword in parsed.keywords:
+            if keyword.arg in params:
+                raise ValueError(f'Duplicate argument: {keyword.arg}')
+            params[keyword.arg] = ast.literal_eval(keyword.value)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f'Arguments must use literal values: {e}') from e
+
+    missing = {'qdf', 'ult0', 'soc'} - params.keys()
+    if missing:
+        raise ValueError(f'Missing required arguments: {", ".join(sorted(missing))}')
+    for name in ('qdf', 'ult0', 'soc'):
+        if not isinstance(params[name], str):
+            raise ValueError(f'{name} must be a quoted string in the command.')
+    return params
+
+
+def _format_bs_wrap_command(params: dict) -> str:
+    return 'bs_wrap.main(' + ', '.join(f'{key}={value!r}' for key, value in params.items()) + ')'
+
+
 def _ask_qdf_params(label=''):
     """Prompts for QDFs, ULT, SOC, kwargs. Returns (qdfs, ult0, soc, kwargs).
     label: additional text for the prompt, e.g. '(fused QDF)' or '(QDFs to overwrite)'"""
     label_str = f' {label}' if label else ''
     print()
+    while True:
+        entry_mode = input('Parameters: 1=individual fields, 2=paste full bs_wrap.main command [1]: ').strip()
+        if entry_mode in ('', '1', '2'):
+            break
+        print('  [!!] Enter 1 or 2.')
+
+    if entry_mode == '2':
+        while True:
+            command = input('Paste one-line bs_wrap.main(...) command: ').strip()
+            try:
+                command_params = _parse_bs_wrap_command(command)
+            except ValueError as e:
+                print(f'  [!!] {e}')
+                continue
+
+            default_qdf = str(command_params['qdf']).upper()
+            qdfs_raw = input(f'QDF(s) separated by commas [{default_qdf}]: ').strip()
+            command_qdfs = [q.strip().upper() for q in qdfs_raw.split(',') if q.strip()]
+            if not command_qdfs:
+                command_qdfs = [default_qdf]
+
+            previews = []
+            for qdf in command_qdfs:
+                params = dict(command_params)
+                params['qdf'] = qdf
+                preview = _format_bs_wrap_command(params)
+                if preview != command:
+                    print(f'\n  Command for {qdf}:\n  {preview}')
+                    while True:
+                        confirm = input('  Send this command? (y/n): ').strip().lower()
+                        if confirm in ('y', 'yes', 'n', 'no'):
+                            break
+                        print('  [!!] Enter y or n.')
+                    if confirm in ('n', 'no'):
+                        break
+                previews.append(params)
+
+            if len(previews) != len(command_qdfs):
+                print('  Command not confirmed. Paste the command again or change the QDF list.')
+                continue
+
+            command_kwargs = {key: value for key, value in command_params.items()
+                              if key not in ('qdf', 'ult0', 'soc')}
+            command_kwargs['_fco_exact_wrapper_args'] = True
+            command_kwargs['_fco_argument_order'] = list(command_params)
+            return command_qdfs, str(command_params['ult0']), str(command_params['soc']), command_kwargs
+
     print(f'Enter the QDFs{label_str} separated by commas.')
     print('  Example: Q9WK, QABC, QXYZ')
     qdfs_raw = input(f'QDFs{label_str:<35}: ').strip()
@@ -2721,14 +2805,22 @@ def _ask_qdf_params(label=''):
 
     ult0 = input('ULT (same for all QDFs)            : ').strip()
 
+    default_kwargs = _load_wrapper_default_kwargs()
+    default_stepping = str(default_kwargs.get('stepping', 'a0')).strip().lower()
+    while True:
+        raw_stepping = input(f'CPU stepping (a0 / b0) [{default_stepping}]: ').strip().lower()
+        stepping = raw_stepping or default_stepping
+        if stepping in ('a0', 'b0'):
+            break
+        print('  [!!] Invalid stepping, enter a0 or b0.')
+
     while True:
         soc = input('SOC (x4 / x1)                              : ').strip().lower()
         if soc in ('x4', 'x1'):
             break
         print('  [!!] Invalid option, enter x4 or x1.')
 
-    kwargs = {}
-    default_kwargs = _load_wrapper_default_kwargs()
+    kwargs = {'stepping': stepping}
     print()
     print('Default wrapper kwargs from config.json:')
     print(f'  {_format_kwargs_compact(default_kwargs)}')
@@ -2747,7 +2839,7 @@ def _ask_qdf_params(label=''):
                 parsed[kw.arg] = ast.literal_eval(kw.value)
             if not parsed:
                 raise ValueError('No valid kwargs found')
-            kwargs = parsed
+            kwargs.update(parsed)
             break
         except Exception:
             print("  [!!] Invalid format. Use Python kwargs format, e.g.: pwrgoodmethod='usb', fused_unit=False")
