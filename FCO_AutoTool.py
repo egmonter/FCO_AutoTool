@@ -2937,8 +2937,10 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
                 time.sleep(1)
             except Exception as e:
                 _status(f'Could not send reboot before CentOS flow: {e}. Continuing...', 'warn')
-        elif mode == 2 or (mode == 1 and centos_only):
-            _status('Requesting power cycle from pysv before CentOS boot...', 'info')
+        elif mode == 1 and centos_only:
+            _status('CentOS-only: reusing the boot after the initial overwrite; no extra wrapper or power cycle.', 'info')
+        elif mode == 2:
+            _status('Mode 2: Requesting power cycle from pysv before CentOS boot...', 'info')
 
             # Clean stale signals to avoid false-positive completion.
             for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal']:
