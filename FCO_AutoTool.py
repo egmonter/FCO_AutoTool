@@ -52,10 +52,6 @@ class BiosTimeoutError(FCOStepError):
     """BIOS screen did not appear within the expected time — retryable via power cycle."""
     pass
 
-class BiosStallError(BiosTimeoutError):
-    """No serial activity at all for a while during BIOS wait — real hang, not just slow POST."""
-    pass
-
 class StepSkippedError(FCOStepError):
     """The operator skipped the currently waiting step."""
     pass
@@ -147,7 +143,6 @@ BOOT_TIMEOUT     = 600   # boot until EFI shell (post-BIOS)       10 min
 BIOS_REBOOT_WAIT = 10    # minimum wait before looking for BIOS (flush buffer)
 BIOS_WAIT_TIMEOUT= 900   # BIOS screen timeout before retry    15 min
 BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
-BIOS_STALL_TIMEOUT = 180  # no serial activity at all -> real hang       3 min
 EFI_SERIAL_TAIL_MAX = 20  # max seconds to keep reading serial after EFI/BIOs detect in Tool 5
 EFI_SERIAL_TAIL_IDLE = 2  # stop tail capture after this many idle seconds
 SVOS_TIMEOUT     = 600   # boot SVOS                               10 min
@@ -172,7 +167,6 @@ _TIMEOUT_DEFAULTS = {
     'BIOS_REBOOT_WAIT': BIOS_REBOOT_WAIT,
     'BIOS_WAIT_TIMEOUT': BIOS_WAIT_TIMEOUT,
     'BIOS_NUDGE_INTERVAL': BIOS_NUDGE_INTERVAL,
-    'BIOS_STALL_TIMEOUT': BIOS_STALL_TIMEOUT,
     'SVOS_TIMEOUT': SVOS_TIMEOUT,
     'CENTOS_BOOT_TIMEOUT': CENTOS_BOOT_TIMEOUT,
     'MOUNTSV_TIMEOUT': MOUNTSV_TIMEOUT,
@@ -200,7 +194,7 @@ def _ensure_timeouts_file():
 
 def _apply_timeouts_from_file():
     """Loads timeout values from timeouts_config.json and applies them globally."""
-    global BOOT_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL, BIOS_STALL_TIMEOUT
+    global BOOT_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL
     global SVOS_TIMEOUT, CENTOS_BOOT_TIMEOUT, MOUNTSV_TIMEOUT, CMD_TIMEOUT
     global SC_TIMEOUT, ROCKET_TIMEOUT, MEMIC_TIMEOUT, MLC_TIMEOUT, SOLAR_TIMEOUT
     global OSVOSUPDATE_TIMEOUT, SVOSINFO_TIMEOUT, UPDATE_MOUNTSV_TIMEOUT
@@ -942,7 +936,6 @@ class SVOSSession:
         self.buf     = b''
         self._capture_stack = []
         self._live_log = None
-        self._last_rx_time = time.monotonic()
         try:
             SERIAL_SEGMENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
             live_path = SERIAL_SEGMENT_LOG_DIR / f'live_{_sanitize_log_token(port)}.log'
@@ -1073,7 +1066,6 @@ class SVOSSession:
             if chunk:
                 self.buf += chunk
                 self._print(chunk)
-                self._last_rx_time = time.monotonic()
             if expected in self.buf:
                 out, self.buf = self.buf, b''
                 return out
@@ -1094,7 +1086,6 @@ class SVOSSession:
             if chunk:
                 self.buf += chunk
                 self._print(chunk)
-                self._last_rx_time = time.monotonic()
             for p in enc:
                 if p in self.buf:
                     out, self.buf = self.buf, b''
@@ -1223,23 +1214,15 @@ def _wait_for_bios_with_nudge(s: SVOSSession, timeout: int | None, enable_nudge:
     Waits for the BIOS screen.
     If enable_nudge=True and no data arrives (static BIOS), sends a refresh key
     every BIOS_NUDGE_INTERVAL seconds to force redraw over serial.
-    Raises BiosStallError early (before the full timeout) if the serial line goes
-    completely silent for BIOS_STALL_TIMEOUT seconds — a sign of a real BIOS/POST hang.
     """
     nudge_key = b'\x1b[B'  # down arrow
     deadline = (time.time() + timeout) if timeout is not None else None
-    s._last_rx_time = time.monotonic()  # stall clock starts now, not from an earlier command
 
     while True:
         if _check_skip_key():
             if NO_KILL_TIME:
                 raise StepSkippedError('Waiting for BIOS screen')
             raise BiosTimeoutError("BIOS screen wait skipped by user pressing 's'")
-
-        if time.monotonic() - s._last_rx_time > BIOS_STALL_TIMEOUT:
-            raise BiosStallError(
-                f'No serial activity at all for {BIOS_STALL_TIMEOUT}s while waiting for BIOS '
-                '(system appears hung in POST).')
 
         if deadline is None:
             wait = BIOS_NUDGE_INTERVAL
@@ -1990,8 +1973,9 @@ def run_supercollider(s: SVOSSession) -> str:
     for attempt in range(1, 3):
         _status(f'Running SuperCollider (sc -M 5), attempt {attempt}/2...', 'step')
         started_at = time.monotonic()
+        s.send('sc -M 5 > sc_out.txt')
         with _guard('SuperCollider - sc -M 5'):
-            _run_svos_sync(s, 'sc -M 5 > sc_out.txt', SC_TIMEOUT, 'SuperCollider - sc -M 5')
+            s.read_until(SVOS_PROMPT, timeout=SC_TIMEOUT)
         elapsed = time.monotonic() - started_at
         if elapsed >= CONTENT_MIN_RUNTIME:
             break
@@ -2006,8 +1990,9 @@ def run_supercollider(s: SVOSSession) -> str:
             _status('SuperCollider remained too short after retry; recording FAIL.', 'fail')
             return 'FAIL'
 
+    s.send('grep -i "TEST PASSED\\|TEST FAILED" sc_out.txt')
     with _guard('parse sc_out.txt'):
-        buf, _ = _run_svos_sync(s, 'grep -i "TEST PASSED\\|TEST FAILED" sc_out.txt', CMD_TIMEOUT, 'parse sc_out.txt')
+        _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
     result = 'PASS' if b'TEST PASSED' in buf else ('FAIL' if b'TEST FAILED' in buf else 'UNKNOWN')
     _status(f'SuperCollider: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'SuperCollider {result} — press any key to continue...')
@@ -2083,21 +2068,11 @@ def _failed_rocket_labels(results: dict) -> list:
             if results.get(label, 'FAIL') not in ('PASS', 'SKIPPED')]
 
 
-def _failed_content_labels(results: dict) -> list:
-    """Rocket configs plus SuperCollider/Memicals/Solar/MLC that did not PASS and were not SKIPPED."""
-    labels = _failed_rocket_labels(results)
-    labels += [key for key in ('supercollider', 'memicals', 'solar', 'mlc')
-               if results.get(key, 'FAIL') not in ('PASS', 'SKIPPED')]
-    return labels
-
-
-def run_content_retry(s: SVOSSession, failed_labels: list) -> dict:
-    """Runs the contention recovery sequence once, then retests each failed SVOS content item."""
+def run_rocket_retry(s: SVOSSession, failed_labels: list) -> dict:
+    """Runs the contention recovery sequence once, then retests each failed Rocket."""
     rocket_commands = {name: cmd for cmd, name in ROCKET_ALL_CMDS}
-    retest_fns = {'supercollider': run_supercollider, 'memicals': run_memicals,
-                  'solar': run_solar, 'mlc': run_mlc}
-    _status(f'Failed: {", ".join(failed_labels)}. Running contention recovery sequence once...', 'warn')
-    with _monitor_stage('Recovery (killmax/umountsv/rmmodsvos2/mountsv)'):
+    _status(f'Rocket failed: {", ".join(failed_labels)}. Running contention recovery sequence once...', 'warn')
+    with _monitor_stage('Rocket recovery (killmax/umountsv/rmmodsvos2/mountsv)'):
         for prep_cmd in ['killmax', 'umountsv', 'rmmodsvos2', 'mountsv']:
             _status(f'  Running {prep_cmd}...', 'info')
             started_at = time.monotonic()
@@ -2108,23 +2083,17 @@ def run_content_retry(s: SVOSSession, failed_labels: list) -> dict:
 
     results = {}
     for label in failed_labels:
-        with _monitor_stage(f'{label} retest') as set_stage_status:
-            if label in rocket_commands:
-                # A prior aborted run can leave a truncated/binary .txt that breaks the status grep.
-                with _guard(f'cleanup {label}.txt before retest'):
-                    _run_svos_sync(s, f'rm -f {label}.txt', CMD_TIMEOUT, f'cleanup {label}.txt before retest')
-                retry_result = _run_rocket_cmd(s, rocket_commands[label], label)
-            else:
-                retry_result = retest_fns[label](s)
+        with _monitor_stage(f'Rocket {label} retest') as set_stage_status:
+            retry_result = _run_rocket_cmd(s, rocket_commands[label], label)
             if retry_result != 'PASS':
                 set_stage_status('FAIL')
         results[label] = f'{retry_result} (Retest)'
-        _status(f'{label} fallback result: {results[label]}', 'info')
-        _pause(f'{label} fallback retry {results[label]} — press any key to continue...')
+        _status(f'Rocket {label} fallback result: {results[label]}', 'info')
+        _pause(f'Rocket {label} fallback retry {results[label]} — press any key to continue...')
     return results
 
 
-def _apply_retry_result(results: dict, failed_labels: list, retry_res):
+def _apply_rocket_retry_result(results: dict, failed_labels: list, retry_res):
     if isinstance(retry_res, dict):
         results.update(retry_res)
     else:
@@ -2134,11 +2103,12 @@ def _apply_retry_result(results: dict, failed_labels: list, retry_res):
 
 def run_memicals(s: SVOSSession) -> str:
     _status('Running Memicals (memic.py -M 15)...', 'step')
+    s.send('memic.py -M 15 memicals:high-mem:proc -X proc:0,1,2,3 > memic_tst.txt')
     with _guard('Memicals - memic.py'):
-        _run_svos_sync(s, 'memic.py -M 15 memicals:high-mem:proc -X proc:0,1,2,3 > memic_tst.txt',
-                       MEMIC_TIMEOUT, 'Memicals - memic.py')
+        s.read_until(SVOS_PROMPT, timeout=MEMIC_TIMEOUT)
+    s.send('grep -i "pass\\|fail\\|success" memic_tst.txt')
     with _guard('parse memic_tst.txt'):
-        buf, _ = _run_svos_sync(s, 'grep -i "pass\\|fail\\|success" memic_tst.txt', CMD_TIMEOUT, 'parse memic_tst.txt')
+        _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
     result = 'PASS' if (b'PASS' in buf.upper() or b'SUCCESS' in buf.upper()) else ('FAIL' if b'FAIL' in buf.upper() else 'UNKNOWN')
     _status(f'Memicals: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'Memicals {result} — press any key to continue...')
@@ -2147,11 +2117,12 @@ def run_memicals(s: SVOSSession) -> str:
 
 def run_mlc(s: SVOSSession) -> str:
     _status('Running MLC (mlc --loaded_latency -t60)...', 'step')
+    s.send('mlc --loaded_latency -t60 -Mdatapattern_halfA_half5.txt > mlc_test.txt')
     with _guard('MLC'):
-        _run_svos_sync(s, 'mlc --loaded_latency -t60 -Mdatapattern_halfA_half5.txt > mlc_test.txt',
-                      MLC_TIMEOUT, 'MLC')
+        s.read_until(SVOS_PROMPT, timeout=MLC_TIMEOUT)
+    s.send('grep -i "pass\\|fail\\|success" mlc_test.txt')
     with _guard('parse mlc_test.txt'):
-        buf, _ = _run_svos_sync(s, 'grep -i "pass\\|fail\\|success" mlc_test.txt', CMD_TIMEOUT, 'parse mlc_test.txt')
+        _, buf = s.read_until_any([SVOS_PROMPT], timeout=CMD_TIMEOUT)
     result = 'PASS' if (b'PASS' in buf.upper() or b'SUCCESS' in buf.upper()) else ('FAIL' if b'FAIL' in buf.upper() else 'UNKNOWN')
     _status(f'MLC: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'MLC {result} — press any key to continue...')
@@ -2160,9 +2131,24 @@ def run_mlc(s: SVOSSession) -> str:
 
 def run_solar(s: SVOSSession) -> str:
     _status('Running Solar...', 'step')
-    with _guard('Solar'):
-        buf, _ = _run_svos_sync(s, SOLAR_CMD, SOLAR_TIMEOUT, 'Solar')
-    result = 'PASS' if (b'PASS' in buf.upper() or b'SUCCESS' in buf.upper()) else ('FAIL' if b'FAIL' in buf.upper() else 'UNKNOWN')
+    s.send(SOLAR_CMD)
+    solar_timeout = False
+    try:
+        _, buf = s.read_until_any([b'PASS', b'pass', b'FAIL', b'fail',
+                                    SVOS_PROMPT], timeout=SOLAR_TIMEOUT)
+        result = 'PASS' if (b'PASS' in buf or b'pass' in buf) else 'FAIL'
+    except TimeoutError:
+        result = 'FAIL'
+        solar_timeout = True
+        _status('Solar: TIMEOUT', 'fail')
+    try:
+        s.read_until(SVOS_PROMPT, timeout=120)
+    except TimeoutError:
+        solar_timeout = True
+
+    if solar_timeout:
+        _recover_svos_prompt_after_timeout(s, 'Solar')
+
     _status(f'Solar: {result}', 'ok' if result == 'PASS' else 'fail')
     _pause(f'Solar {result} — press any key to continue...')
     return result
@@ -2479,7 +2465,7 @@ def _clean_signals(qdf_list):
                 sig.unlink()
                 logging.info(f'Previous signal removed: {name}')
     # Clean up global retry signals
-    for name in ['retry_needed.signal', 'retry_needed.json', 'retry_ready.signal', 'autotool_done.signal']:
+    for name in ['retry_needed.signal', 'retry_needed.json', 'retry_ready.signal']:
         sig = SIGNAL_DIR / name
         if sig.exists():
             sig.unlink()
@@ -2913,71 +2899,6 @@ def _has_svos_content(content) -> bool:
     return any(test in content for test in CONTENT_TESTS if test not in ('centos_boot', 'svos_boot'))
 
 
-def _request_pysv_power_cycle(qdf: str) -> bool:
-    """Asks pysv to power-cycle the SUT (no fuse overwrite). Returns True on success."""
-    _status(f'Requesting power cycle from pysv for {qdf}...', 'info')
-    power_cycle_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycle.signal'
-    power_cycled_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycled.signal'
-    for sig in (power_cycle_signal, power_cycled_signal):
-        if sig.exists():
-            sig.unlink()
-
-    power_cycle_signal.write_text('requested\n')
-    _status(f'Sent signal: {power_cycle_signal.name}', 'info')
-    with _monitor_stage(f'{qdf} - CentOS power cycle request'):
-        _status('Waiting for pysv power cycle completion...', 'wait')
-        _wait_for_file(power_cycled_signal)
-    done_content = power_cycled_signal.read_text().strip()
-    if done_content == 'error':
-        _status('pysv reported error during power cycle.', 'fail')
-        return False
-    _status('Power cycle completed by pysv.', 'ok')
-    return True
-
-
-def _prepare_centos_reboot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str,
-                           kwargs: dict, centos_only: bool) -> bool:
-    """Requests the reboot/overwrite needed before navigating to CentOS. Returns False on failure.
-
-    Modes 1/3/4 redo the full fuse overwrite (wrapper) so a prior power cycle never leaves the
-    SUT on stale/default fuses; mode 2 only needs a plain power cycle (no SVOS overwrite content).
-    """
-    if mode == 2 and centos_only:
-        # CentOS-only: no SVOS, no pysv needed — go straight to BIOS/CentOS navigation.
-        _status('CentOS-only: sending reboot and then navigating to CentOS...', 'info')
-        try:
-            s.send('reboot')
-            time.sleep(1)
-        except Exception as e:
-            _status(f'Could not send reboot before CentOS flow: {e}. Continuing...', 'warn')
-        return True
-    if mode == 2:
-        # Mode 2 with SVOS tests: request hardware power cycle from pysv.
-        return _request_pysv_power_cycle(qdf)
-
-    # Modes with pysv (1, 3, 4): request wrapper to re-run the fuse overwrite for CentOS
-    _status('Modes 1/3/4: Requesting wrapper execution from pysv...', 'info')
-    wrapper_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper.signal'
-    wrapper_signal.write_text(json.dumps({
-        'qdf': qdf, 'ult0': ult0, 'soc': soc, 'kwargs': kwargs or {}
-    }) + '\n')
-    _status(f'Sent signal: {wrapper_signal.name}', 'info')
-
-    wrapper_done_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper_done.signal'
-    if wrapper_done_signal.exists():
-        wrapper_done_signal.unlink()
-    with _monitor_stage(f'{qdf} - CentOS wrapper execution'):
-        _status('Waiting for pysv wrapper execution...', 'wait')
-        _wait_for_file(wrapper_done_signal)
-
-    done_content = wrapper_done_signal.read_text().strip()
-    if done_content == 'error':
-        _status('pysv reported error in wrapper execution.', 'fail')
-        return False
-    _status('Wrapper execution completed by pysv.', 'ok')
-    return True
-
-
 def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = 'x4', 
                      kwargs: dict = None, is_retry: bool = False,
                      centos_only: bool = False) -> str:
@@ -2992,8 +2913,65 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
     _status(f'Running CentOS boot (reboot + {CENTOS_GRUB_PATH} + login)...', 'step')
     
     try:
-        if not _prepare_centos_reboot(s, mode, qdf, ult0, soc, kwargs, centos_only):
-            return 'FAIL'
+        # Reboot/overwrite preparation depends on mode and fused status
+        if mode == 2 and centos_only:
+            # CentOS-only: no SVOS, no pysv needed — go straight to BIOS/CentOS navigation.
+            _status('CentOS-only: sending reboot and then navigating to CentOS...', 'info')
+            try:
+                s.send('reboot')
+                time.sleep(1)
+            except Exception as e:
+                _status(f'Could not send reboot before CentOS flow: {e}. Continuing...', 'warn')
+        elif mode == 2:
+            # Mode 2 with SVOS tests: request hardware power cycle from pysv.
+            _status('Mode 2: Requesting power cycle from pysv...', 'info')
+
+            # Clean stale signals to avoid false-positive completion.
+            for sig_name in [f'{qdf}_centos_power_cycle.signal', f'{qdf}_centos_power_cycled.signal']:
+                sig = SIGNAL_DIR / sig_name
+                if sig.exists():
+                    sig.unlink()
+            
+            # Write power cycle signal
+            power_cycle_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycle.signal'
+            power_cycle_signal.write_text('requested\n')
+            _status(f'Sent signal: {power_cycle_signal.name}', 'info')
+            
+            # Wait for power cycle completion
+            power_cycled_signal = SIGNAL_DIR / f'{qdf}_centos_power_cycled.signal'
+            with _monitor_stage(f'{qdf} - CentOS power cycle request'):
+                _status(f'Waiting for pysv power cycle completion...', 'wait')
+                _wait_for_file(power_cycled_signal)
+            
+            done_content = power_cycled_signal.read_text().strip()
+            if done_content == 'error':
+                _status('pysv reported error during power cycle.', 'fail')
+                return 'FAIL'
+            
+            _status('Power cycle completed by pysv.', 'ok')
+        else:
+            # Modes with pysv (1, 3, 4): request wrapper to run for CentOS overwrite
+            _status('Modes 1/3/4: Requesting wrapper execution from pysv...', 'info')
+            
+            # Write wrapper request signal
+            wrapper_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper.signal'
+            wrapper_signal.write_text(json.dumps({
+                'qdf': qdf, 'ult0': ult0, 'soc': soc, 'kwargs': kwargs or {}
+            }) + '\n')
+            _status(f'Sent signal: {wrapper_signal.name}', 'info')
+            
+            # Wait for wrapper completion
+            wrapper_done_signal = SIGNAL_DIR / f'{qdf}_centos_wrapper_done.signal'
+            with _monitor_stage(f'{qdf} - CentOS wrapper execution'):
+                _status(f'Waiting for pysv wrapper execution...', 'wait')
+                _wait_for_file(wrapper_done_signal)
+            
+            done_content = wrapper_done_signal.read_text().strip()
+            if done_content == 'error':
+                _status('pysv reported error in wrapper execution.', 'fail')
+                return 'FAIL'
+            
+            _status('Wrapper execution completed by pysv.', 'ok')
         
         # Boot CentOS (split monitor stages: Boot to EFI -> Boot CentOS)
         centos_result = boot_centos(
@@ -3008,33 +2986,7 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
             _status('CentOS boot successful.', 'ok')
         _pause('CentOS boot OK — validate and press any key to continue...')
         return 'PASS'
-
-    except BiosStallError as e:
-        _status(f'CentOS boot stalled: {e}', 'fail')
-        logging.error(f'CentOS boot stalled for {qdf}: {e}', exc_info=True)
-        _status('Retrying: redoing reboot/overwrite before trying CentOS boot again...', 'warn')
-        if not _prepare_centos_reboot(s, mode, qdf, ult0, soc, kwargs, centos_only):
-            _status('Recovery failed; giving up on CentOS boot for this QDF.', 'fail')
-            return 'FAIL'
-        try:
-            centos_result = boot_centos(
-                s,
-                fused_nudge=(mode in (2, 3, 4)),
-                monitor_split=True,
-                stage_prefix=f'{qdf} (retry)',
-            )
-            if centos_result == 'CONDITIONAL_PASS':
-                _status('CentOS boot conditional PASS on retry.', 'warn')
-            else:
-                _status('CentOS boot successful on retry.', 'ok')
-            _pause('CentOS boot OK — validate and press any key to continue...')
-            return 'PASS'
-        except Exception as e2:
-            _status(f'CentOS boot FAILED again after power cycle: {e2}', 'fail')
-            logging.error(f'CentOS boot failed again for {qdf}: {e2}', exc_info=True)
-            _status('Auto-skip enabled: continuing with next QDF after CentOS failure.', 'warn')
-            return 'FAIL'
-
+        
     except Exception as e:
         _status(f'CentOS boot FAILED: {e}', 'fail')
         logging.error(f'CentOS boot failed for {qdf}: {e}', exc_info=True)
@@ -3353,11 +3305,12 @@ def _open_serial(com_port: str) -> 'SVOSSession':
     results['mlc']      = (_run_safe('MLC', run_mlc, s, _tkey='mlc')
                            if _should_run(content, 'mlc')      else 'SKIPPED')
 
-    failed_items = _failed_content_labels(results)
-    if failed_items:
-        retry_res = _run_safe('Content fallback', run_content_retry, s, failed_items,
-                              _tkey='rocket_dsa')
-        _apply_retry_result(results, failed_items, retry_res)
+    if _should_run(content, 'rocket'):
+        failed_rockets = _failed_rocket_labels(results)
+        if failed_rockets:
+            retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                  _tkey='rocket_dsa')
+            _apply_rocket_retry_result(results, failed_rockets, retry_res)
 
     try:
         run_parser(s)
@@ -3529,11 +3482,12 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 # If any SVOS content already ran successfully, SVOS boot is implicitly validated.
                 results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
-            failed_items = _failed_content_labels(results)
-            if failed_items:
-                retry_res = _run_safe('Content fallback', run_content_retry, s, failed_items,
-                                      _tkey='rocket_dsa')
-                _apply_retry_result(results, failed_items, retry_res)
+            if _should_run(content, 'rocket'):
+                failed_rockets = _failed_rocket_labels(results)
+                if failed_rockets:
+                    retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                          _tkey='rocket_dsa')
+                    _apply_rocket_retry_result(results, failed_rockets, retry_res)
 
             if has_svos_tests:
                 try:
@@ -3709,7 +3663,6 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 else:
                     for _, label in ROCKET_CMDS:
                         results[label] = 'SKIPPED'
-                    results['rocket_dram_dsa'] = 'SKIPPED'
 
                 results['memicals'] = (_run_safe_r('Memicals', run_memicals, s, _tkey='memicals',
                                                    _monitor_label=f'{qdf} - Retry Memicals')
@@ -3731,11 +3684,14 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                     # Retry follows same rule: any executed SVOS content implies boot validation.
                     results['svos_boot'] = 'PASS' if has_svos_tests_r else 'SKIPPED'
 
-                failed_items = _failed_content_labels(results)
-                if failed_items:
-                    retry_res = _run_safe_r('Content fallback', run_content_retry, s, failed_items,
-                                            _tkey='rocket_dsa')
-                    _apply_retry_result(results, failed_items, retry_res)
+                if _should_run(content_r, 'rocket'):
+                    failed_rockets = _failed_rocket_labels(results)
+                    if failed_rockets:
+                        retry_res = _run_safe_r('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                                _tkey='rocket_dsa')
+                        _apply_rocket_retry_result(results, failed_rockets, retry_res)
+                else:
+                    results['rocket_dram_dsa'] = 'SKIPPED'
 
                 if has_svos_tests_r:
                     try:
@@ -3893,7 +3849,6 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
     else:
         for _, label in ROCKET_CMDS:
             results[label] = 'SKIPPED'
-        results['rocket_dram_dsa'] = 'SKIPPED'
 
     results['memicals'] = (_run_safe('Memicals', run_memicals, s, _tkey='memicals',
                                      _monitor_label=f'{qdf} - Memicals')
@@ -3915,11 +3870,14 @@ def run_fused_test(s: SVOSSession, qdf: str, ult0: str, week: str, ifwi: str,
         # Same rule as main loop: if any SVOS content ran, boot is implicitly validated.
         results['svos_boot'] = 'PASS' if has_svos_tests else 'SKIPPED'
 
-    failed_items = _failed_content_labels(results)
-    if failed_items:
-        retry_res = _run_safe('Content fallback', run_content_retry, s, failed_items,
-                              _tkey='rocket_dsa')
-        _apply_retry_result(results, failed_items, retry_res)
+    if _should_run(content, 'rocket'):
+        failed_rockets = _failed_rocket_labels(results)
+        if failed_rockets:
+            retry_res = _run_safe('Rocket fallback', run_rocket_retry, s, failed_rockets,
+                                  _tkey='rocket_dsa')
+            _apply_rocket_retry_result(results, failed_rockets, retry_res)
+    else:
+        results['rocket_dram_dsa'] = 'SKIPPED'
 
     if has_svos_tests:
         try:
@@ -5119,11 +5077,6 @@ def main():
                 logging.info('Serial port closed.')
             except Exception:
                 pass
-        try:
-            (SIGNAL_DIR / 'autotool_done.signal').write_text('done\n')
-            logging.info('autotool_done.signal written (pysv idle loop can stop monitoring).')
-        except Exception:
-            pass
 
     # ---- Summary file for all QDFs ----
     if all_results:
