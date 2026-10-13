@@ -224,8 +224,8 @@ def run_qdf_list(itp, sv, bs_wrap, qdf_list=None, signal_dir=None):
             if i < len(qdf_list) - 1:
                 print("  Auto-continue enabled: proceeding with next QDF after bootscript failure.")
                 continue
-            else:
-                return
+            print("  Last QDF failed. Keeping pysv alive for retry/power-cycle signals.")
+            break
 
         # Signal FCO_AutoTool that it can proceed
         sv_done = sig_dir / f'{qdf}_sv_done.signal'
