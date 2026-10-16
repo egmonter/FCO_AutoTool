@@ -146,6 +146,7 @@ BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
 EFI_SERIAL_TAIL_MAX = 20  # max seconds to keep reading serial after EFI/BIOs detect in Tool 5
 EFI_SERIAL_TAIL_IDLE = 2  # stop tail capture after this many idle seconds
 SVOS_TIMEOUT     = 600   # boot SVOS                               10 min
+SVOS_LOGIN_TIMEOUT = 600  # wait after ENTER for the SVOS login/root prompt 10 min
 CENTOS_BOOT_TIMEOUT = 600  # boot CentOS                           10 min
 MOUNTSV_TIMEOUT  = 1800  # mountsv                                 30 min
 CMD_TIMEOUT      = 120   # comandos normales                        2 min
@@ -168,6 +169,7 @@ _TIMEOUT_DEFAULTS = {
     'BIOS_WAIT_TIMEOUT': BIOS_WAIT_TIMEOUT,
     'BIOS_NUDGE_INTERVAL': BIOS_NUDGE_INTERVAL,
     'SVOS_TIMEOUT': SVOS_TIMEOUT,
+    'SVOS_LOGIN_TIMEOUT': SVOS_LOGIN_TIMEOUT,
     'CENTOS_BOOT_TIMEOUT': CENTOS_BOOT_TIMEOUT,
     'MOUNTSV_TIMEOUT': MOUNTSV_TIMEOUT,
     'CMD_TIMEOUT': CMD_TIMEOUT,
@@ -195,7 +197,7 @@ def _ensure_timeouts_file():
 def _apply_timeouts_from_file():
     """Loads timeout values from timeouts_config.json and applies them globally."""
     global BOOT_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL
-    global SVOS_TIMEOUT, CENTOS_BOOT_TIMEOUT, MOUNTSV_TIMEOUT, CMD_TIMEOUT
+    global SVOS_TIMEOUT, SVOS_LOGIN_TIMEOUT, CENTOS_BOOT_TIMEOUT, MOUNTSV_TIMEOUT, CMD_TIMEOUT
     global SC_TIMEOUT, ROCKET_TIMEOUT, MEMIC_TIMEOUT, MLC_TIMEOUT, SOLAR_TIMEOUT
     global OSVOSUPDATE_TIMEOUT, SVOSINFO_TIMEOUT, UPDATE_MOUNTSV_TIMEOUT
 
@@ -1515,7 +1517,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                     _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
                     s.send_enter()
                     with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
-                        matched_login, _ = s.read_until_any(login_patterns, timeout=20)
+                        matched_login, _ = s.read_until_any(login_patterns, timeout=SVOS_LOGIN_TIMEOUT)
 
             if matched_login == SVOS_PROMPT:
                 _status('SVOS is already at the authenticated root shell; skipping login credentials.', 'ok')

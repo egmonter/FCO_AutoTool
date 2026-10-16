@@ -267,6 +267,7 @@ TIMEOUTS (timeouts_config.json)
   Common keys:
     - BIOS_WAIT_TIMEOUT
     - BOOT_TIMEOUT
+    - SVOS_LOGIN_TIMEOUT (retry wait after ENTER when SVOS login prompt is delayed)
     - MOUNTSV_TIMEOUT
     - ROCKET_TIMEOUT
     - UPDATE_MOUNTSV_TIMEOUT
