@@ -2739,6 +2739,22 @@ def _parse_bs_wrap_command(command: str) -> dict:
     for name in ('qdf', 'ult0', 'soc'):
         if not isinstance(params[name], str):
             raise ValueError(f'{name} must be a quoted string in the command.')
+    legacy_stepping = params.pop('stepping', None)
+    stepping_fs = params.get('stepping_fs', legacy_stepping or 'a0')
+    if legacy_stepping and 'stepping_fs' in params and legacy_stepping.lower() != stepping_fs.lower():
+        raise ValueError('Conflicting values for stepping and stepping_fs.')
+    if not isinstance(stepping_fs, str) or not stepping_fs.strip():
+        raise ValueError('stepping_fs must be a quoted string.')
+    stepping_fs = stepping_fs.strip().lower()
+    params['stepping_fs'] = stepping_fs
+
+    extra_args = params.get('extra_args') or {}
+    if not isinstance(extra_args, dict):
+        raise ValueError('extra_args must be a dictionary, e.g. extra_args={\'disable_axon\': True}.')
+    extra_args = dict(extra_args)
+    extra_args.setdefault('disable_axon', True)
+    extra_args['stepping'] = stepping_fs.upper()
+    params['extra_args'] = extra_args
     return params
 
 
@@ -2806,7 +2822,7 @@ def _ask_qdf_params(label=''):
     ult0 = input('ULT (same for all QDFs)            : ').strip()
 
     default_kwargs = _load_wrapper_default_kwargs()
-    default_stepping = str(default_kwargs.get('stepping', 'a0')).strip().lower()
+    default_stepping = str(default_kwargs.get('stepping_fs', default_kwargs.get('stepping', 'a0'))).strip().lower()
     while True:
         raw_stepping = input(f'CPU stepping (a0 / b0) [{default_stepping}]: ').strip().lower()
         stepping = raw_stepping or default_stepping
@@ -2820,7 +2836,13 @@ def _ask_qdf_params(label=''):
             break
         print('  [!!] Invalid option, enter x4 or x1.')
 
-    kwargs = {'stepping': stepping}
+    kwargs = {key: value for key, value in default_kwargs.items()
+              if key not in ('stepping', 'stepping_fs', 'extra_args')}
+    kwargs['stepping_fs'] = stepping
+    default_extra_args = dict(default_kwargs.get('extra_args') or {})
+    default_extra_args.setdefault('disable_axon', True)
+    default_extra_args['stepping'] = stepping.upper()
+    kwargs['extra_args'] = default_extra_args
     print()
     print('Default wrapper kwargs from config.json:')
     print(f'  {_format_kwargs_compact(default_kwargs)}')
@@ -2839,7 +2861,14 @@ def _ask_qdf_params(label=''):
                 parsed[kw.arg] = ast.literal_eval(kw.value)
             if not parsed:
                 raise ValueError('No valid kwargs found')
+            extra_overrides = parsed.pop('extra_args', None)
             kwargs.update(parsed)
+            if extra_overrides is not None:
+                if not isinstance(extra_overrides, dict):
+                    raise ValueError('extra_args must be a Python dict')
+                kwargs['extra_args'].update(extra_overrides)
+            kwargs['extra_args']['disable_axon'] = kwargs['extra_args'].get('disable_axon', True)
+            kwargs['extra_args']['stepping'] = stepping.upper()
             break
         except Exception:
             print("  [!!] Invalid format. Use Python kwargs format, e.g.: pwrgoodmethod='usb', fused_unit=False")

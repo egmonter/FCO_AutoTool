@@ -74,7 +74,7 @@ TOOL 1 (FCO Automation):
 
       Wrapper parameter entry:
         - Choose individual fields (default), or paste a full command:
-          bs_wrap.main(qdf='QCQL', ult0='0x41932011C09EA181', proj='DMRUCC', stepping='a0', soc='x4', compute_config='x4', pwrgoodmethod='usb', fused_unit=False, extra_args={'disable_axon': True, 'stepping': 'B2'}, pwrgooddelay=30)
+          bs_wrap.main(qdf='QCQL', ult0='0x41932011C09EA181', proj='DMRUCC', stepping_fs='a0', soc='x4', compute_config='x4', pwrgoodmethod='usb', fused_unit=False, extra_args={'disable_axon': True, 'stepping': 'A0'}, pwrgooddelay=30)
         - The pasted command is parsed as literal Python values; it is not executed.
         - If you provide multiple QDFs, the tool substitutes only `qdf` and asks
           for confirmation whenever a generated command differs from the pasted one.

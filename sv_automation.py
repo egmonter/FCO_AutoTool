@@ -45,15 +45,26 @@ def _load_fixed_params() -> dict:
         with open(CONFIG_FILE, encoding='utf-8') as f:
             cfg = json.load(f)
         print(f'[sv_automation] config.json loaded from: {CONFIG_FILE}')
-        return {k: v for k, v in cfg.items() if not k.startswith('_')}
+        params = {k: v for k, v in cfg.items() if not k.startswith('_')}
     except FileNotFoundError:
         print(f'[!!] config.json not found (buscado en {[str(p) for p in _CONFIG_SEARCH]}). Using defaults.')
-        return dict(proj='DMRUCC', stepping='a0', pwrgoodmethod='usb',
-                    fused_unit=False, pwrgooddelay=30)
+        params = dict(proj='DMRUCC', stepping_fs='a0', pwrgoodmethod='usb',
+                      fused_unit=False, pwrgooddelay=30)
     except Exception as e:
         print(f'[!!] Error reading config.json: {e}. Using defaults.')
-        return dict(proj='DMRUCC', stepping='a0', pwrgoodmethod='usb',
-                    fused_unit=False, pwrgooddelay=30)
+        params = dict(proj='DMRUCC', stepping_fs='a0', pwrgoodmethod='usb',
+                      fused_unit=False, pwrgooddelay=30)
+
+    if 'stepping_fs' not in params:
+        params['stepping_fs'] = params.pop('stepping', 'a0')
+    else:
+        params.pop('stepping', None)
+    stepping_fs = str(params['stepping_fs']).strip().lower()
+    extra_args = dict(params.get('extra_args') or {})
+    extra_args.setdefault('disable_axon', True)
+    extra_args['stepping'] = stepping_fs.upper()
+    params['extra_args'] = extra_args
+    return params
 
 FIXED_PARAMS = _load_fixed_params()
 
