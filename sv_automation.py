@@ -379,33 +379,8 @@ def _extract_log_path_from_text(text: str) -> Path | None:
         return None
 
 
-def _scan_recent_bootscript_logs(base_log: Path | None, seconds_window: int = 180) -> list[Path]:
-    """Returns recent bootscript logs near the current execution window."""
-    default_dir = Path(r'C:\pythonsv\diamondrapids\toolext\bootscript\logfiles')
-    if not default_dir.exists():
-        return []
-
-    now = time.time()
-    min_mtime = now - seconds_window
-    if base_log and base_log.exists():
-        try:
-            min_mtime = min(min_mtime, base_log.stat().st_mtime - 1)
-        except Exception:
-            pass
-
-    out = []
-    for p in sorted(default_dir.glob('boot_*.log'), key=lambda x: x.stat().st_mtime, reverse=True):
-        try:
-            if p.stat().st_mtime >= min_mtime:
-                out.append(p)
-        except Exception:
-            continue
-        if len(out) >= 5:
-            break
-    return out
-
-
-def _assert_bootscript_success(context: str, captured_text: str, log_path: Path | None):
+def _assert_bootscript_success(context: str, captured_text: str, log_path: Path | None,
+                               previous_log: Path | None = None):
     """Raises RuntimeError when known bootscript failure signatures are detected."""
     if _bootscript_text_has_failure(captured_text):
         raise RuntimeError(
@@ -417,11 +392,8 @@ def _assert_bootscript_success(context: str, captured_text: str, log_path: Path 
     explicit_log = _extract_log_path_from_text(captured_text)
     if explicit_log:
         candidate_logs.append(explicit_log)
-    if log_path:
+    if log_path and (previous_log is None or log_path != previous_log):
         candidate_logs.append(log_path)
-    for recent in _scan_recent_bootscript_logs(log_path):
-        if recent not in candidate_logs:
-            candidate_logs.append(recent)
 
     for lp in candidate_logs:
         if not lp or not lp.exists():
@@ -523,6 +495,7 @@ def run_mode2_centos_monitor(qdf=None, signal_dir=None):
 
 def _build_wrapper_params(qdf, ult0, soc, kwargs):
     kwargs = dict(kwargs or {})
+    kwargs.pop('_fco_wrapper_alias', None)
     exact_args = bool(kwargs.pop('_fco_exact_wrapper_args', False))
     arg_order = kwargs.pop('_fco_argument_order', [])
     if exact_args:
@@ -537,8 +510,27 @@ def _build_wrapper_params(qdf, ult0, soc, kwargs):
     return all_params
 
 
+def _resolve_wrapper(default_wrapper, kwargs):
+    alias = kwargs.get('_fco_wrapper_alias', 'bs_wrap')
+    if not kwargs.get('_fco_exact_wrapper_args') or alias == 'bs_wrap':
+        return default_wrapper, 'bs_wrap'
+    if not isinstance(alias, str) or not alias.isidentifier() or alias.startswith('_'):
+        raise ValueError(f'Invalid wrapper alias: {alias!r}')
+    namespace = vars(sys.modules['__main__'])
+    ipython = sys.modules.get('IPython')
+    if ipython is not None:
+        shell = ipython.get_ipython()
+        if shell is not None:
+            namespace = shell.user_ns
+    wrapper = namespace.get(alias)
+    if not callable(getattr(wrapper, 'main', None)):
+        raise ValueError(f'Wrapper alias {alias!r} is not loaded in pysv. Import it before starting the queue.')
+    return wrapper, alias
+
+
 def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     progress_file = kwargs.pop('progress_file', None)
+    wrapper, wrapper_alias = _resolve_wrapper(bs_wrap, kwargs)
     _write_progress(progress_file, 'HOOK_CHECK')
     print("  hook check (first action) ...")
     hook_ok = True
@@ -610,7 +602,7 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
 
     params_str = ', '.join(f"{k}={v!r}" for k, v in all_params.items())
     print(f"\n  Command to run:")
-    print(f"  bs_wrap.main({params_str})")
+    print(f"  {wrapper_alias}.main({params_str})")
     print()
 
     _write_progress(progress_file, 'WRAPPER_RUNNING')
@@ -619,14 +611,13 @@ def _run_sv_fuse(itp, sv, bs_wrap, qdf, ult0, soc='x4', **kwargs):
     tee_out = _TeeCapture(sys.stdout, capture)
     tee_err = _TeeCapture(sys.stderr, capture)
     with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
-        bs_wrap.main(**all_params)
+        wrapper.main(**all_params)
     wrapped_output = capture.getvalue()
     if wrapped_output:
         print(wrapped_output, end='')
 
     log_after = _get_latest_bootscript_log()
-    log_for_check = log_after or log_before
-    _assert_bootscript_success(f'QDF={qdf}', wrapped_output, log_for_check)
+    _assert_bootscript_success(f'QDF={qdf}', wrapped_output, log_after, previous_log=log_before)
 
     _write_progress(progress_file, 'WRAPPER_DONE')
 
@@ -693,24 +684,26 @@ def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
                 soc_w = wrapper_params.get('soc', 'x4')
                 kwargs_w = wrapper_params.get('kwargs', {})
 
+                wrapper, wrapper_alias = _resolve_wrapper(bs_wrap, kwargs_w)
                 all_params_w = _build_wrapper_params(qdf_w, ult0_w, soc_w, kwargs_w)
 
                 print(f"  [CentOS-Wrapper] Executing wrapper for {qdf_w}...")
                 params_str = ', '.join(f"{k}={v!r}" for k, v in all_params_w.items())
-                print(f"  [CentOS-Wrapper] bs_wrap.main({params_str})")
+                print(f"  [CentOS-Wrapper] {wrapper_alias}.main({params_str})")
                 log_before = _get_latest_bootscript_log()
                 capture = io.StringIO()
                 tee_out = _TeeCapture(sys.stdout, capture)
                 tee_err = _TeeCapture(sys.stderr, capture)
                 with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
-                    bs_wrap.main(**all_params_w)
+                    wrapper.main(**all_params_w)
                 wrapped_output = capture.getvalue()
                 if wrapped_output:
                     print(wrapped_output, end='')
 
                 log_after = _get_latest_bootscript_log()
-                log_for_check = log_after or log_before
-                _assert_bootscript_success(f'CentOS wrapper QDF={qdf_w}', wrapped_output, log_for_check)
+                _assert_bootscript_success(
+                    f'CentOS wrapper QDF={qdf_w}', wrapped_output, log_after, previous_log=log_before
+                )
 
                 (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('done\n')
                 wrapper_sig.unlink(missing_ok=True)

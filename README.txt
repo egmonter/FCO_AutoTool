@@ -79,6 +79,13 @@ TOOL 1 (FCO Automation):
         - If you provide multiple QDFs, the tool substitutes only `qdf` and asks
           for confirmation whenever a generated command differs from the pasted one.
         - Pasted arguments are used as-is and are not merged with config.json defaults.
+        - Full-command mode also accepts another imported alias, such as cfcio.main(...).
+          Before starting the queue, place bs_wrap_cfcio_bump.py under the local pysv
+          users/mkcummin folder and run in the pysv console:
+            import users.mkcummin.bs_wrap_cfcio_bump as cfcio
+          The alias must be loaded in the active pysv console; otherwise the request
+          fails before hardware operations. Individual-field mode still uses bs_wrap.
+          Custom aliases are preserved for overwrite retries and CentOS wrapper requests.
 
   e) Content to run per QDF:
        - Full SVOS content for all  → answer 'y'

@@ -2721,8 +2721,8 @@ def _parse_bs_wrap_command(command: str) -> dict:
         raise ValueError(f'Invalid Python command syntax: {e.msg}') from e
     if not (isinstance(parsed, ast.Call) and isinstance(parsed.func, ast.Attribute)
             and isinstance(parsed.func.value, ast.Name)
-            and parsed.func.value.id == 'bs_wrap' and parsed.func.attr == 'main'):
-        raise ValueError('Paste a full bs_wrap.main(...) command.')
+            and parsed.func.attr == 'main' and not parsed.func.value.id.startswith('_')):
+        raise ValueError('Paste a full wrapper_alias.main(...) command.')
     if parsed.args or any(keyword.arg is None for keyword in parsed.keywords):
         raise ValueError('Use keyword arguments only; ** unpacking is not supported.')
 
@@ -2757,11 +2757,15 @@ def _parse_bs_wrap_command(command: str) -> dict:
     extra_args.setdefault('disable_axon', True)
     extra_args['stepping'] = stepping_fs.upper()
     params['extra_args'] = extra_args
+    params['_fco_wrapper_alias'] = parsed.func.value.id
     return params
 
 
 def _format_bs_wrap_command(params: dict) -> str:
-    return 'bs_wrap.main(' + ', '.join(f'{key}={value!r}' for key, value in params.items()) + ')'
+    alias = params.get('_fco_wrapper_alias', 'bs_wrap')
+    return f'{alias}.main(' + ', '.join(
+        f'{key}={value!r}' for key, value in params.items() if key != '_fco_wrapper_alias'
+    ) + ')'
 
 
 def _ask_qdf_params(label=''):
@@ -2777,7 +2781,7 @@ def _ask_qdf_params(label=''):
 
     if entry_mode == '2':
         while True:
-            command = input('Paste one-line bs_wrap.main(...) command: ').strip()
+            command = input('Paste one-line wrapper.main(...) command (bs_wrap, cfcio, etc.): ').strip()
             try:
                 command_params = _parse_bs_wrap_command(command)
             except ValueError as e:
@@ -2813,7 +2817,7 @@ def _ask_qdf_params(label=''):
             command_kwargs = {key: value for key, value in command_params.items()
                               if key not in ('qdf', 'ult0', 'soc')}
             command_kwargs['_fco_exact_wrapper_args'] = True
-            command_kwargs['_fco_argument_order'] = list(command_params)
+            command_kwargs['_fco_argument_order'] = [key for key in command_params if key != '_fco_wrapper_alias']
             return command_qdfs, str(command_params['ult0']), str(command_params['soc']), command_kwargs
 
     print(f'Enter the QDFs{label_str} separated by commas.')
