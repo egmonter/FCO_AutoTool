@@ -1,5 +1,6 @@
 {
   "_comment": "IA Mode working template: fields the agent collects before preparing ia_config.json. Not read by FCO_AutoTool.py directly.",
+  "system": "",
   "ult": "",
   "qdf_list": []
 }
