@@ -713,6 +713,39 @@ def _handle_centos_requests(sig_dir, bs_wrap, qdf_list):
                 (sig_dir / f'{qdf_str}_centos_wrapper_done.signal').write_text('error\n')
                 wrapper_sig.unlink(missing_ok=True)
 
+    for qdf_str in qdf_list:
+        status_scope_sig = sig_dir / f'{qdf_str}_status_scope.signal'
+        if status_scope_sig.exists():
+            handled = True
+            print(f"\n  [status_scope] Detected: {status_scope_sig.name}")
+            print("  [status_scope] Running status_scope.run() \u2014 this takes ~1 hour, pysv is busy until it finishes...")
+            result = {}
+            try:
+                from diamondrapids.toolext import status_scope
+                capture = io.StringIO()
+                tee_out = _TeeCapture(sys.stdout, capture)
+                tee_err = _TeeCapture(sys.stderr, capture)
+                with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
+                    zip_path = status_scope.run(collectors=['namednodes'],
+                                                analyzers=['error', 'auto', 'timeout'])
+                output_text = capture.getvalue()
+                if output_text:
+                    print(output_text, end='')
+                axon_match = re.search(r'https://axonsv\.app\.intel\.com/apps/record-viewer/\S+', output_text)
+                result = {
+                    'zip_path': str(zip_path),
+                    'axon_url': axon_match.group(0).rstrip('.,)]') if axon_match else None,
+                }
+                (sig_dir / f'{qdf_str}_status_scope_result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+                (sig_dir / f'{qdf_str}_status_scope_done.signal').write_text('done\n')
+                print(f"  [status_scope] Completed for {qdf_str}. Zip: {zip_path}  Axon: {result.get('axon_url')}")
+            except Exception as e:
+                print(f"  [!!] Error during status_scope.run() for {qdf_str}: {e}")
+                result['error'] = str(e)
+                (sig_dir / f'{qdf_str}_status_scope_result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+                (sig_dir / f'{qdf_str}_status_scope_done.signal').write_text('error\n')
+            status_scope_sig.unlink(missing_ok=True)
+
     return handled
 
 
