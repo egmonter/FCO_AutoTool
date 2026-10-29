@@ -48,8 +48,9 @@ automatic timeout aborts.
   3 - Update SVOS             (osvsetrelease + osvosupdate)
   4 - Boot CentOS only
   5 - EFI Timing              (overwrite + time to BIOS/EFI gray screen)
+  6 - IA Mode                 (load configuration prepared by the agent)
 
-  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5)
+  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5, t6)
 
 
 Then, depending on the tool selected:
@@ -144,6 +145,25 @@ TOOL 4 (Boot CentOS only):
     not be completed
     (triggered after ~3 minutes in that state)
   - Keeps the tool window open after boot (Ctrl+C to close)
+
+TOOL 6 (IA Mode):
+  - No interactive prompts for mode/COM/week/QDFs/content — the configuration
+    comes from a JSON file prepared ahead of time (by hand or by an AI agent).
+  - The tool detects this machine's hostname and reads:
+      I:\engineering\dev\user_links\egmonter\FCO_AutoTool_ENG\<HOSTNAME>\ia_config.json
+    The <HOSTNAME> folder is created automatically if it does not exist yet.
+  - ia_config.json uses the exact same schema as the normal "last saved
+    configuration" (mode, com_port, week, qdf_list with per-QDF content),
+    plus an informational "generated_at" timestamp.
+  - On launch it prints the file path, the "generated_at" timestamp, and the
+    full configuration summary, then asks "Use this IA configuration? (y/n)"
+    — same safety confirmation as the normal flow, so you can see at a glance
+    whether you are about to run the latest prepared data or a stale file.
+  - If no ia_config.json is found for this host, it tells you where it looked
+    and exits without attempting a run.
+  - Today this has only been exercised with the Mode 1/4 schema (qdf_list
+    array); Modes 2/3 schemas should work the same way but are not yet
+    validated through IA Mode.
 
 The script writes qdf_list.json with the entered parameters and then waits
 for the SV signal for each QDF. Do NOT close it.

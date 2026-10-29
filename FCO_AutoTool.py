@@ -23,6 +23,7 @@ import json
 import time
 import ctypes
 import serial
+import socket
 import logging
 import argparse
 import datetime
@@ -115,6 +116,11 @@ LAST_UPDATE_CONFIG_FILE = BASE_DIR / 'last_update_config.json'
 LAST_EFI_TIMING_CONFIG_FILE = BASE_DIR / 'last_efi_timing_config.json'
 TIMEOUTS_CONFIG_FILE = BASE_DIR / 'timeouts_config.json'
 WRAPPER_CONFIG_FILE = BASE_DIR / 'config.json'
+
+# IA mode: shared staging area on the I: drive where the agent drops a ready-to-run
+# config (qdf_list + content) per SUT host, so a human only has to confirm it.
+IA_COMM_BASE_DIR = Path(r'I:\engineering\dev\user_links\egmonter\FCO_AutoTool_ENG')
+IA_CONFIG_FILENAME = 'ia_config.json'
 
 # GitHub repo for auto-update
 GITHUB_REPO_URL = 'https://github.com/egmonter/FCO_AutoTool.git'
@@ -3172,6 +3178,30 @@ def _load_last_config() -> dict:
         return None
 
 
+def _ia_hostname() -> str:
+    """Returns this machine's hostname, used to namespace the IA-mode comm folder."""
+    return os.environ.get('COMPUTERNAME') or socket.gethostname()
+
+
+def _get_ia_comm_dir() -> Path:
+    """Returns (creating if needed) this host's IA-mode folder on the shared I: drive."""
+    d = IA_COMM_BASE_DIR / _ia_hostname()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _load_ia_config():
+    """Loads the agent-prepared IA-mode config for this host. Returns (data_or_None, file_path)."""
+    ia_file = _get_ia_comm_dir() / IA_CONFIG_FILENAME
+    if not ia_file.exists():
+        return None, ia_file
+    try:
+        return json.loads(ia_file.read_text(encoding='utf-8')), ia_file
+    except Exception as e:
+        _status(f'Could not read {ia_file}: {e}', 'warn')
+        return None, ia_file
+
+
 def _save_json_file(path: Path, data: dict):
     try:
         with open(path, 'w', encoding='utf-8') as f:
@@ -4161,8 +4191,8 @@ def _show_mode2_centos_pysv_instructions(qdf: str):
 def _ask_tool_menu() -> str:
     """
     Shows the main tools menu before the FCO flow.
-    Returns: 'fco' | 'boot' | 'update' | 'centos_direct' | 'efi_timing'
-    Prefix 't' activates TEST_MODE (e.g. t1, t2, t3, t4, t5).
+    Returns: 'fco' | 'boot' | 'update' | 'centos_direct' | 'efi_timing' | 'ia'
+    Prefix 't' activates TEST_MODE (e.g. t1, t2, t3, t4, t5, t6).
     """
     global TEST_MODE
     print()
@@ -4175,19 +4205,20 @@ def _ask_tool_menu() -> str:
     print('  3 - Update SVOS             (osvsetrelease + osvosupdate)')
     print('  4 - Boot CentOS only')
     print('  5 - EFI Timing              (overwrite + time to BIOS/EFI gray screen)')
+    print('  6 - IA Mode                 (load configuration prepared by the agent)')
     print()
-    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5)')
+    print('  Prefix t for TEST MODE (e.g. t1, t2, t3, t4, t5, t6)')
     print()
-    _map = {'1': 'fco', '2': 'boot', '3': 'update', '4': 'centos_direct', '5': 'efi_timing'}
+    _map = {'1': 'fco', '2': 'boot', '3': 'update', '4': 'centos_direct', '5': 'efi_timing', '6': 'ia'}
     while True:
-        raw = input('Tool (1-5): ').strip().lower()
+        raw = input('Tool (1-6): ').strip().lower()
         if raw.startswith('t') and raw[1:] in _map:
             TEST_MODE = True
             print('  [TEST MODE activated]')
             return _map[raw[1:]]
         if raw in _map:
             return _map[raw]
-        print('  [!!] Enter 1, 2, 3, 4 or 5.')
+        print('  [!!] Enter 1, 2, 3, 4, 5 or 6.')
 
 
 def run_efi_timing(com_port: str):
@@ -4844,16 +4875,38 @@ def main():
             _pause_before_close('EFI TIMING')
         return
 
-    # ---- From here: tool == 'fco' ----
+    # ---- From here: tool == 'fco' or 'ia' ----
 
     # ---- Last saved configuration? ----
-    _cfg_last = _load_last_config()
-    use_last  = False
-    if _cfg_last is not None:
-        _print_last_config(_cfg_last)
-        use_last = input('  Use this configuration? (y/n): ').strip().lower() in ('s', 'y', 'yes')
-        if use_last:
-            TEST_MODE = _cfg_last.get('test_mode', False)
+    if tool == 'ia':
+        ia_data, ia_file = _load_ia_config()
+        if ia_data is None:
+            print(f'\n[!!] No IA config found at: {ia_file}')
+            print('     Ask the agent to generate it first, then rerun IA Mode.')
+            _pause_before_close('IA MODE')
+            return
+        print()
+        print('=' * 60)
+        print('  IA MODE \u2014 configuration prepared by the agent')
+        print('=' * 60)
+        print(f'  File         : {ia_file}')
+        print(f'  Generated at : {ia_data.get("generated_at", "unknown")}')
+        _print_last_config(ia_data)
+        confirm = input('  Use this IA configuration? (y/n): ').strip().lower()
+        if confirm not in ('s', 'y', 'yes'):
+            print('  Cancelled.')
+            return
+        _cfg_last = ia_data
+        use_last  = True
+        TEST_MODE = ia_data.get('test_mode', False)
+    else:
+        _cfg_last = _load_last_config()
+        use_last  = False
+        if _cfg_last is not None:
+            _print_last_config(_cfg_last)
+            use_last = input('  Use this configuration? (y/n): ').strip().lower() in ('s', 'y', 'yes')
+            if use_last:
+                TEST_MODE = _cfg_last.get('test_mode', False)
 
     # ---- Execution mode ----
     if use_last:
