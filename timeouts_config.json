@@ -1,6 +1,7 @@
 {
   "_comment": "Edit timeout values in seconds. Positive integers only.",
   "BOOT_TIMEOUT": 600,
+  "ATTENTION_TIMEOUT": 600,
   "BIOS_REBOOT_WAIT": 10,
   "BIOS_WAIT_TIMEOUT": 1800,
   "BIOS_NUDGE_INTERVAL": 5,

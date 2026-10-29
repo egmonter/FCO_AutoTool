@@ -57,6 +57,11 @@ class BiosStallError(BiosTimeoutError):
     """No serial activity at all for a while during BIOS wait — real hang, not just slow POST."""
     pass
 
+class BootStallError(BiosTimeoutError):
+    """Boot sequence stalled after BIOS was detected (menu nav, EFI shell, ATTENTION, or SVOS
+    login) — retryable via power cycle + overwrite, same as BiosStallError."""
+    pass
+
 class StepSkippedError(FCOStepError):
     """The operator skipped the currently waiting step."""
     pass
@@ -76,6 +81,18 @@ def _guard(step_desc: str):
         yield
     except TimeoutError:
         raise FCOStepError(f'TIMEOUT waiting for: {step_desc}')
+    except serial.SerialException as e:
+        raise FCOStepError(f'Serial error in "{step_desc}": {e}')
+
+
+@contextlib.contextmanager
+def _guard_bootstall(step_desc: str):
+    """Like _guard, but TimeoutError becomes BootStallError so the step is retried
+    (power cycle + overwrite) instead of being a one-shot ERROR."""
+    try:
+        yield
+    except TimeoutError:
+        raise BootStallError(f'TIMEOUT waiting for: {step_desc}')
     except serial.SerialException as e:
         raise FCOStepError(f'Serial error in "{step_desc}": {e}')
 
@@ -150,6 +167,7 @@ CENTOS_SHELL_PROMPTS = [b'# ', b'root@', b'[root@']
 
 # Maximum time (seconds) to wait for long prompts
 BOOT_TIMEOUT     = 600   # boot until EFI shell (post-BIOS)       10 min
+ATTENTION_TIMEOUT = 600  # ATTENTION msg after launching grubx64.efi (NO_KILL_TIME = unbounded) 10 min
 BIOS_REBOOT_WAIT = 10    # minimum wait before looking for BIOS (flush buffer)
 BIOS_WAIT_TIMEOUT= 900   # BIOS screen timeout before retry    15 min
 BIOS_NUDGE_INTERVAL = 5  # seconds between refresh keys if BIOS is static
@@ -176,6 +194,7 @@ NO_KILL_TIME = False
 
 _TIMEOUT_DEFAULTS = {
     'BOOT_TIMEOUT': BOOT_TIMEOUT,
+    'ATTENTION_TIMEOUT': ATTENTION_TIMEOUT,
     'BIOS_REBOOT_WAIT': BIOS_REBOOT_WAIT,
     'BIOS_WAIT_TIMEOUT': BIOS_WAIT_TIMEOUT,
     'BIOS_NUDGE_INTERVAL': BIOS_NUDGE_INTERVAL,
@@ -208,7 +227,7 @@ def _ensure_timeouts_file():
 
 def _apply_timeouts_from_file():
     """Loads timeout values from timeouts_config.json and applies them globally."""
-    global BOOT_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL, BIOS_STALL_TIMEOUT
+    global BOOT_TIMEOUT, ATTENTION_TIMEOUT, BIOS_REBOOT_WAIT, BIOS_WAIT_TIMEOUT, BIOS_NUDGE_INTERVAL, BIOS_STALL_TIMEOUT
     global SVOS_TIMEOUT, SVOS_LOGIN_TIMEOUT, CENTOS_BOOT_TIMEOUT, MOUNTSV_TIMEOUT, CMD_TIMEOUT
     global SC_TIMEOUT, ROCKET_TIMEOUT, MEMIC_TIMEOUT, MLC_TIMEOUT, SOLAR_TIMEOUT
     global OSVOSUPDATE_TIMEOUT, SVOSINFO_TIMEOUT, UPDATE_MOUNTSV_TIMEOUT
@@ -1469,7 +1488,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                         s.send_escape()
                         time.sleep(1.5)
                     else:
-                        raise FCOStepError(
+                        raise BootStallError(
                             f'Could not navigate BIOS after {BIOS_NAV_RETRIES} intentos. '
                             f'Last error: {e}')
 
@@ -1480,7 +1499,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
         _status('Sending ENTER after post-ESC settle...', 'step')
         s.send_enter()
         _status('Waiting for EFI Shell...', 'wait')
-        with _guard('EFI Shell prompt'):
+        with _guard_bootstall('EFI Shell prompt'):
             matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
         matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
         _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
@@ -1532,15 +1551,22 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                         _status(f'{SVOS_GRUB_PATH} not found on {fs}: (prompt returned quickly), trying next...', 'info')
                         continue
                 except TimeoutError:
-                    # No prompt within 10s = the file loaded and is booting, wait without limit
-                    _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION without limit (ENTER every 5s)...', 'wait')
-                    _read_until_any_with_periodic_enter(
-                        s,
-                        [ATTENTION],
-                        timeout=None,
-                        enter_every=5,
-                        tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
-                    )
+                    # No prompt within 10s = the file loaded and is booting; wait bounded by
+                    # ATTENTION_TIMEOUT (unbounded only in NO_KILL_TIME/validation mode).
+                    _status(f'{SVOS_GRUB_PATH} loading on {fs}:, waiting for ATTENTION '
+                           f'(timeout {ATTENTION_TIMEOUT}s unless validation mode, ENTER every 5s)...', 'wait')
+                    try:
+                        _read_until_any_with_periodic_enter(
+                            s,
+                            [ATTENTION],
+                            timeout=ATTENTION_TIMEOUT,
+                            enter_every=5,
+                            tick_msg='Still waiting ATTENTION, sending ENTER keepalive...'
+                        )
+                    except TimeoutError:
+                        raise BootStallError(
+                            f'No ATTENTION message after launching {SVOS_GRUB_PATH} '
+                            f'within {ATTENTION_TIMEOUT}s.')
                     booted = True
                     break
 
@@ -1555,7 +1581,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
 
             # 7. Wait for the first root@... prompt (temporary post-ATTENTION shell)
             _status('Loading SVOS...', 'wait')
-            with _guard('shell SVOS post-boot (root@... prompt)'):
+            with _guard_bootstall('shell SVOS post-boot (root@... prompt)'):
                 s.read_until(SVOS_PROMPT, timeout=SVOS_TIMEOUT)
             _status('Temporary shell ready. Running login...', 'step')
             t_root = _timing('ATTENTION -> first root@ prompt', since=t_attention)
@@ -1584,7 +1610,7 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                 except TimeoutError:
                     _status('SVOS login prompt not detected yet. Sending ENTER and retrying...', 'warn')
                     s.send_enter()
-                    with _guard('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
+                    with _guard_bootstall('SVOS login prompt (hostname login:) - verify that SVOS loaded correctly'):
                         matched_login, _ = s.read_until_any(login_patterns, timeout=SVOS_LOGIN_TIMEOUT)
 
             if matched_login == SVOS_PROMPT:
@@ -1593,12 +1619,12 @@ def boot_svos(s: SVOSSession, do_mountsv: bool = True, fused_nudge: bool = False
                 _status('Entering user: root', 'step')
                 s.send('root')
 
-                with _guard('prompt "Password:"'):
+                with _guard_bootstall('prompt "Password:"'):
                     s.read_until_any(['Password:', 'password:'], timeout=30)
                 _status('Entering password...', 'step')
                 s.send('svos')
 
-                with _guard('successful login - verify user/password (root/svos)'):
+                with _guard_bootstall('successful login - verify user/password (root/svos)'):
                     s.read_until(SVOS_PROMPT, timeout=30)
             _status('Login successful. SVOS shell ready (root@... prompt).', 'ok')
             _timing('SVOS login complete', since=t_root)
@@ -1797,7 +1823,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False,
                         s.send_escape()
                         time.sleep(1.5)
                     else:
-                        raise FCOStepError(
+                        raise BootStallError(
                             f'Could not navigate BIOS after {BIOS_NAV_RETRIES} attempts. '
                             f'Last error: {e}')
 
@@ -1807,7 +1833,7 @@ def boot_centos(s: SVOSSession, fused_nudge: bool = False,
             _status('Sending ENTER after post-ESC settle...', 'step')
             s.send_enter()
             _status('Waiting for EFI Shell...', 'wait')
-            with _guard('EFI Shell prompt'):
+            with _guard_bootstall('EFI Shell prompt'):
                 matched_prompt, _ = s.read_until_any(EFI_PROMPTS + [b'FS0:', b'FS1:', b'FS2:'], timeout=BOOT_TIMEOUT)
             matched_txt = matched_prompt.decode('utf-8', errors='replace') if isinstance(matched_prompt, bytes) else str(matched_prompt)
             _status(f'EFI Shell ready. Detected prompt token: {matched_txt!r}', 'ok')
@@ -3172,7 +3198,7 @@ def run_centos_boot(s: SVOSSession, mode: int, qdf: str, ult0: str, soc: str = '
         _pause('CentOS boot OK — validate and press any key to continue...')
         return 'PASS'
 
-    except BiosStallError as e:
+    except BiosTimeoutError as e:
         _status(f'CentOS boot stalled: {e}', 'fail')
         logging.error(f'CentOS boot stalled for {qdf}: {e}', exc_info=True)
         _status('Retrying: redoing reboot/overwrite before trying CentOS boot again...', 'warn')
@@ -3990,6 +4016,12 @@ def _run_main_loop(s: SVOSSession, qdf_list: list, week: str, ult0: str, ifwi: s
                 _status(f'RETRY QDF {qdf} failed again ({type(e).__name__}): {e}', 'fail')
                 logging.error(f'[RETRY] {type(e).__name__} in QDF {qdf}: {e}')
                 _alert_popup_async(f'RETRY FAIL — {qdf}', f'Fallo en segundo intento.\n{e}')
+                if ENABLE_STATUS_SCOPE_ON_STALL:
+                    _status('SVOS boot retry also failed: requesting status_scope diagnostics from pysv...', 'warn')
+                    try:
+                        _request_status_scope(qdf)
+                    except Exception as e3:
+                        _status(f'status_scope request failed: {e3}', 'fail')
                 for r in all_results:
                     if r['qdf'] == qdf:
                         r['overall'] = 'RETRY_FAIL'
