@@ -164,6 +164,15 @@ TOOL 6 (IA Mode):
   - Today this has only been exercised with the Mode 1/4 schema (qdf_list
     array); Modes 2/3 schemas should work the same way but are not yet
     validated through IA Mode.
+  - Real-time I: drive mirror (any mode, not just IA Mode): whenever this host's
+    IA folder is reachable, every run also mirrors, live, to
+      I:\engineering\dev\user_links\egmonter\FCO_AutoTool_ENG\<HOSTNAME>\logs\
+    the app log, the live serial transcript (Serial Logs\live_<port>.log), and
+    the per-QDF/summary reports — the same files/content written locally, just
+    duplicated there as they are produced. This is the bridge used to diagnose
+    hosts that cannot be reached directly (e.g. no UNC/admin-share access).
+    If the I: drive is not reachable, the tool logs a warning and continues
+    normally without the mirror (non-fatal).
 
 The script writes qdf_list.json with the entered parameters and then waits
 for the SV signal for each QDF. Do NOT close it.

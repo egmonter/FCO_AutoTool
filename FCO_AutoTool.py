@@ -876,14 +876,17 @@ def _selected_items_by_arrow(raw: bytes) -> list:
 def setup_logging(log_file):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     fmt = '%(asctime)s [%(levelname)s] %(message)s'
-    logging.basicConfig(
-        level   = logging.INFO,
-        format  = fmt,
-        handlers= [
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout),
-        ]
-    )
+    handlers = [
+        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.StreamHandler(sys.stdout),
+    ]
+    mirror_dir = _get_ia_mirror_subdir()
+    if mirror_dir is not None:
+        try:
+            handlers.append(logging.FileHandler(mirror_dir / Path(log_file).name, encoding='utf-8'))
+        except Exception as e:
+            print(f'[!!] Could not open IA log mirror: {e}')
+    logging.basicConfig(level=logging.INFO, format=fmt, handlers=handlers)
 
 
 # ---------------------------------------------------------------------------
@@ -956,16 +959,28 @@ class SVOSSession:
         self.buf     = b''
         self._capture_stack = []
         self._live_log = None
+        self._live_log_mirror = None
+        header = (f'Live serial log - {port} - started '
+                 f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n{"-" * 70}\n')
         try:
             SERIAL_SEGMENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
             live_path = SERIAL_SEGMENT_LOG_DIR / f'live_{_sanitize_log_token(port)}.log'
             self._live_log = open(live_path, 'w', encoding='utf-8')
-            self._live_log.write(f'Live serial log - {port} - started '
-                                 f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n{"-" * 70}\n')
+            self._live_log.write(header)
             self._live_log.flush()
         except Exception as e:
             logging.warning(f'Could not open live serial log: {e}')
             self._live_log = None
+        mirror_dir = _get_ia_mirror_subdir('Serial Logs')
+        if mirror_dir is not None:
+            try:
+                mirror_path = mirror_dir / f'live_{_sanitize_log_token(port)}.log'
+                self._live_log_mirror = open(mirror_path, 'w', encoding='utf-8')
+                self._live_log_mirror.write(header)
+                self._live_log_mirror.flush()
+            except Exception as e:
+                logging.warning(f'Could not open IA mirror live serial log: {e}')
+                self._live_log_mirror = None
 
     def begin_serial_capture(self, phase_name: str):
         """Starts a serial transcript capture for a specific boot phase."""
@@ -999,12 +1014,19 @@ class SVOSSession:
     def _capture_text(self, text: str):
         if not text:
             return
+        clean = _ANSI_RE.sub('', text)
         if self._live_log is not None:
             try:
-                self._live_log.write(_ANSI_RE.sub('', text))
+                self._live_log.write(clean)
                 self._live_log.flush()
             except Exception:
                 self._live_log = None
+        if self._live_log_mirror is not None:
+            try:
+                self._live_log_mirror.write(clean)
+                self._live_log_mirror.flush()
+            except Exception:
+                self._live_log_mirror = None
         if not self._capture_stack:
             return
         for capture in self._capture_stack:
@@ -1133,6 +1155,12 @@ class SVOSSession:
             except Exception:
                 pass
             self._live_log = None
+        if self._live_log_mirror is not None:
+            try:
+                self._live_log_mirror.close()
+            except Exception:
+                pass
+            self._live_log_mirror = None
         self.ser.close()
 
     def _print(self, data: bytes):
@@ -2343,6 +2371,14 @@ def write_result_log(qdf: str, week: str, ult0: str, ifwi: str, results: dict,
     archive_path = log_dir / f'FCO_WW{week}_{qdf}_{ts}.txt'
     archive_path.write_text(content, encoding='utf-8')
 
+    mirror_dir = _get_ia_mirror_subdir('reports')
+    if mirror_dir is not None:
+        try:
+            (mirror_dir / local_path.name).write_text(content, encoding='utf-8')
+            (mirror_dir / archive_path.name).write_text(content, encoding='utf-8')
+        except Exception as e:
+            logging.warning(f'Could not mirror result log to IA folder: {e}')
+
     logging.info(f'Log saved: {local_path}')
     return local_path, overall, content
 
@@ -2405,6 +2441,14 @@ def write_summary_log(week: str, ult0: str, ifwi: str, all_results: list, log_di
     archive_path = log_dir / f'FCO_SUMMARY_WW{week}_{ts}.txt'
     local_path.write_text(content,   encoding='utf-8')
     archive_path.write_text(content, encoding='utf-8')
+
+    mirror_dir = _get_ia_mirror_subdir('reports')
+    if mirror_dir is not None:
+        try:
+            (mirror_dir / local_path.name).write_text(content, encoding='utf-8')
+            (mirror_dir / archive_path.name).write_text(content, encoding='utf-8')
+        except Exception as e:
+            logging.warning(f'Could not mirror summary log to IA folder: {e}')
 
     logging.info(f'Summary saved: {local_path}')
     return local_path
@@ -3188,6 +3232,25 @@ def _get_ia_comm_dir() -> Path:
     d = IA_COMM_BASE_DIR / _ia_hostname()
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _get_ia_mirror_subdir(sub: str = '') -> Path | None:
+    """Returns this host's 'logs' mirror folder on the I: drive (optionally a sub-path).
+
+    This is the bridge used for hosts the agent cannot reach directly over UNC:
+    the app log, live serial log, and result reports are all mirrored here in
+    real time as they are written locally. Returns None (non-fatal) if the I:
+    drive is not reachable from this machine.
+    """
+    try:
+        d = _get_ia_comm_dir() / 'logs'
+        if sub:
+            d = d / sub
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except Exception as e:
+        print(f'[!!] IA mirror folder unavailable ({sub or "logs"}): {e}')
+        return None
 
 
 def _load_ia_config():
