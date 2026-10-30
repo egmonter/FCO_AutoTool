@@ -97,6 +97,27 @@ def _guard_bootstall(step_desc: str):
         raise FCOStepError(f'Serial error in "{step_desc}": {e}')
 
 
+def _disable_quickedit_mode():
+    """Disable Windows console QuickEdit mode: a stray click/selection in the console
+    window otherwise freezes the whole process (and the automation) until Esc/right-click."""
+    if sys.platform != 'win32':
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        STD_INPUT_HANDLE = -10
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_INSERT_MODE = 0x0020
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        new_mode = (mode.value | ENABLE_EXTENDED_FLAGS | ENABLE_INSERT_MODE) & ~ENABLE_QUICK_EDIT_MODE
+        kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:
+        pass
+
+
 def _alert_popup(title: str, msg: str):
     """Non-blocking warning popup + prints to console."""
     import threading
@@ -5037,6 +5058,8 @@ def run_boot_centos_direct(com_port: str):
 # ---------------------------------------------------------------------------
 
 def main():
+    _disable_quickedit_mode()
+
     parser = argparse.ArgumentParser(description='FCO SVOS Serial Automation')
     parser.add_argument('--config', default=str(QDF_LIST_FILE),
                         help='Path to the JSON file with the QDF list')
